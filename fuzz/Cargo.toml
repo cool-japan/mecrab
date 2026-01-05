@@ -1,0 +1,43 @@
+[package]
+name = "mecrab-fuzz"
+version = "0.0.0"
+edition = "2024"
+publish = false
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+
+[dependencies.mecrab]
+path = "../mecrab"
+
+[[bin]]
+name = "viterbi"
+path = "fuzz_targets/viterbi.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "dictionary"
+path = "fuzz_targets/dictionary.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "parser"
+path = "fuzz_targets/parser.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "lattice"
+path = "fuzz_targets/lattice.rs"
+test = false
+doc = false
+bench = false

@@ -1,0 +1,57 @@
+[package]
+name = "kizame"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "KizaMe (刻め!) - CLI for MeCrab morphological analyzer and data pipeline"
+keywords = ["nlp", "morphology", "mecab", "japanese", "cli"]
+categories = ["command-line-utilities", "text-processing"]
+
+[dependencies]
+# Core library
+mecrab = { version = "0.1.0", path = "../mecrab", features = ["json", "parallel"] }
+
+# Word2Vec training
+mecrab-word2vec = { version = "0.1.0", path = "../mecrab-word2vec" }
+
+# CLI framework
+clap.workspace = true
+
+# Platform directories (for dict init)
+dirs = "6.0"
+
+# Optional: Heavy data pipeline (Wikidata processing)
+mecrab-builder = { version = "0.1.0", path = "../mecrab-builder", optional = true }
+
+# Progress bars (lightweight, always included for dict info)
+indicatif.workspace = true
+
+# TUI framework for lattice debugger
+ratatui = "0.30"
+crossterm = "0.29"
+
+# Memory mapping for vector info
+memmap2.workspace = true
+
+# HTTP server (optional)
+axum = { version = "0.8", optional = true }
+tokio = { workspace = true, features = ["full"], optional = true }
+tower = { version = "0.5", optional = true }
+tower-http = { version = "0.6", features = ["trace", "cors"], optional = true }
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+[features]
+default = []
+# Enable `kizame build` command with Wikidata pipeline
+full = ["mecrab-builder"]
+# Enable HTTP server mode
+server = ["axum", "tokio", "tower", "tower-http", "serde", "serde_json"]
+
+[[bin]]
+name = "kizame"
+path = "src/main.rs"

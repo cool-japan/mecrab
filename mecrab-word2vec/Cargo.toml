@@ -1,0 +1,23 @@
+[package]
+name = "mecrab-word2vec"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "High-performance Word2Vec implementation with Hogwild! parallelization for MeCrab"
+keywords = ["nlp", "word2vec", "embeddings", "japanese", "hogwild"]
+categories = ["science", "text-processing"]
+
+[dependencies]
+rayon.workspace = true
+rand = "0.9"
+anyhow = "1.0"
+thiserror.workspace = true
+memmap2.workspace = true
+byteorder.workspace = true
+
+[dev-dependencies]
+criterion = "0.5"

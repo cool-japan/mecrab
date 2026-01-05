@@ -1,0 +1,17 @@
+# MeCrab project-specific cargo config
+#
+# ISSUE: Global RUSTFLAGS from other projects (NumRS2/SciRS2) includes OpenBLAS linkage
+# This config alone cannot override shell environment variables completely.
+#
+# SOLUTIONS:
+# 1. Use the wrapper: ./cargo.sh <command>
+# 2. Use direnv: direnv allow (requires: brew install direnv)
+# 3. Manual: env -u RUSTFLAGS cargo <command>
+
+[target.aarch64-apple-darwin]
+# For Python bindings: use undefined dynamic_lookup
+# This resolves Python symbols at runtime, avoiding version conflicts
+rustflags = [
+    "-C", "link-arg=-undefined",
+    "-C", "link-arg=dynamic_lookup"
+]

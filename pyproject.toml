@@ -1,0 +1,60 @@
+# MeCrab Python Bindings
+# Copyright 2026 COOLJAPAN OU (Team KitaSan)
+#
+# Build with: maturin build --release --features python
+# Install dev: maturin develop --features python
+
+[build-system]
+requires = ["maturin>=1.4,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "mecrab"
+version = "0.1.0"
+description = "High-performance morphological analyzer compatible with MeCab"
+readme = "README.md"
+license = { text = "MIT OR Apache-2.0" }
+authors = [
+    { name = "COOLJAPAN OU (Team KitaSan)" }
+]
+keywords = ["nlp", "morphological-analysis", "mecab", "japanese", "tokenizer"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "License :: OSI Approved :: Apache Software License",
+    "Operating System :: POSIX :: Linux",
+    "Operating System :: MacOS",
+    "Operating System :: Microsoft :: Windows",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Text Processing :: Linguistic",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+requires-python = ">=3.9"
+
+[project.urls]
+Homepage = "https://github.com/kitasan/mecrab"
+Repository = "https://github.com/kitasan/mecrab"
+Documentation = "https://docs.rs/mecrab"
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "pytest-benchmark>=4.0",
+]
+
+[tool.maturin]
+# Build settings
+features = ["python", "parallel"]
+python-source = "python"
+module-name = "mecrab"
+strip = true
+
+# Target the mecrab crate
+manifest-path = "mecrab/Cargo.toml"

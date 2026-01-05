@@ -1,0 +1,34 @@
+# MeCrab Benchmark Suite
+# Copyright 2026 COOLJAPAN OU (Team KitaSan)
+#
+# Separate subcrate for benchmarks to keep core mecrab crate pure Rust
+# without heavy dev-dependencies like criterion.
+
+[package]
+name = "mecrab-bench"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+description = "Benchmark suite for MeCrab morphological analyzer"
+publish = false
+
+[dependencies]
+mecrab = { path = "../mecrab" }
+
+[dev-dependencies]
+criterion.workspace = true
+
+[[bench]]
+name = "parsing"
+harness = false
+
+[[bench]]
+name = "viterbi"
+harness = false
+
+[[bench]]
+name = "dictionary"
+harness = false

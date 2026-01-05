@@ -1,0 +1,35 @@
+# Rust build artifacts
+/target/
+Cargo.lock
+**/target/
+**/fuzz_tokenizer/
+
+# Cargo lock file (optional for libraries, but this is a binary/lib combo)
+# Cargo.lock
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Debug
+*.pdb
+
+# Coverage
+*.profraw
+*.profdata
+lcov.info
+tarpaulin-report.html
+
+# Benchmark results (keep criterion reports in git for tracking)
+# /target/criterion/
+
+# Temporary files
+*.tmp
+*.bak

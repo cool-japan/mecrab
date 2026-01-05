@@ -1,0 +1,54 @@
+[package]
+name = "mecrab"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "A high-performance, thread-safe morphological analyzer compatible with MeCab, written in pure Rust"
+keywords = ["nlp", "morphology", "mecab", "japanese", "tokenizer"]
+categories = ["text-processing", "parsing", "science"]
+
+[dependencies]
+# Core dependencies (always needed)
+memmap2.workspace = true
+byteorder.workspace = true
+encoding_rs.workspace = true
+thiserror.workspace = true
+yada.workspace = true
+bytemuck = "1.24"
+
+# Optional: JSON output support
+serde = { workspace = true, optional = true }
+serde_json = { workspace = true, optional = true }
+
+# Optional: Parallel processing (not for WASM)
+rayon = { workspace = true, optional = true }
+
+# Optional: WASM bindings
+wasm-bindgen = { workspace = true, optional = true }
+js-sys = { workspace = true, optional = true }
+web-sys = { workspace = true, optional = true }
+console_error_panic_hook = { workspace = true, optional = true }
+
+# Optional: Python bindings
+pyo3 = { workspace = true, optional = true }
+
+[features]
+default = ["serde", "serde_json"]
+json = ["serde", "serde_json"]
+parallel = ["rayon"]
+simd = []  # Enable SIMD optimizations (nightly)
+wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
+python = ["pyo3/extension-module", "serde", "serde_json"]
+
+[lib]
+name = "mecrab"
+path = "src/lib.rs"
+# cdylib for Python extension, rlib for Rust library
+crate-type = ["cdylib", "rlib"]
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = false

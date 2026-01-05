@@ -1,0 +1,48 @@
+[package]
+name = "mecrab-builder"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+readme = "README.md"
+description = "Semantic dictionary builder for MeCrab - Wikidata/Wikipedia pipeline"
+keywords = ["nlp", "wikidata", "dictionary", "japanese", "pipeline"]
+categories = ["command-line-utilities", "text-processing"]
+
+[dependencies]
+# Core library (for Token, SemanticEntry definitions)
+mecrab = { version = "0.1.0", path = "../mecrab" }
+
+# Async runtime
+tokio.workspace = true
+
+# HTTP client for Wikidata API
+reqwest.workspace = true
+
+# Async utilities
+futures.workspace = true
+
+# Compression (gzip streaming)
+flate2.workspace = true
+
+# Serialization
+serde.workspace = true
+serde_json.workspace = true
+
+# CSV parsing
+csv.workspace = true
+
+# Progress bars
+indicatif.workspace = true
+
+# Parallel processing
+rayon.workspace = true
+
+# Error handling
+thiserror.workspace = true
+
+[lib]
+name = "mecrab_builder"
+path = "src/lib.rs"
