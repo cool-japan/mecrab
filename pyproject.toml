@@ -39,8 +39,8 @@ classifiers = [
 requires-python = ">=3.9"
 
 [project.urls]
-Homepage = "https://github.com/kitasan/mecrab"
-Repository = "https://github.com/kitasan/mecrab"
+Homepage = "https://github.com/cool-japan/mecrab"
+Repository = "https://github.com/cool-japan/mecrab"
 Documentation = "https://docs.rs/mecrab"
 
 [project.optional-dependencies]
