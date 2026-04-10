@@ -74,7 +74,7 @@ impl Word2Vec {
         let mut syn0 = vec![0.0f32; array_size];
         let syn1neg = vec![0.0f32; array_size];
 
-        use rand::Rng;
+        use rand::RngExt;
         let mut rng = rand::rng();
 
         // Initialize all vectors (remapped_ids are dense 0..vocab_size-1)
@@ -95,7 +95,11 @@ impl Word2Vec {
             array_size,
             array_size * 4 / 1024 / 1024
         );
-        eprintln!("  Indexing: DENSE (remapped IDs 0-{})", vocab_size - 1);
+        if vocab_size > 0 {
+            eprintln!("  Indexing: DENSE (remapped IDs 0-{})", vocab_size - 1);
+        } else {
+            eprintln!("  Indexing: DENSE (empty vocabulary)");
+        }
 
         Self {
             config,

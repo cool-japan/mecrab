@@ -13,11 +13,11 @@ categories = ["science", "text-processing"]
 
 [dependencies]
 rayon.workspace = true
-rand = "0.9"
+rand = "0.10"
 anyhow = "1.0"
 thiserror.workspace = true
 memmap2.workspace = true
 byteorder.workspace = true
 
 [dev-dependencies]
-criterion = "0.5"
+criterion = "0.8"

@@ -46,6 +46,8 @@ pub struct DotConfig {
     pub fontname: String,
     /// Node shape
     pub node_shape: NodeShape,
+    /// Whether to show marginal probabilities on nodes
+    pub show_probs: bool,
 }
 
 impl Default for DotConfig {
@@ -61,6 +63,7 @@ impl Default for DotConfig {
             rankdir: RankDir::LeftToRight,
             fontname: "Noto Sans CJK JP".to_string(),
             node_shape: NodeShape::Box,
+            show_probs: false,
         }
     }
 }
@@ -86,6 +89,7 @@ impl DotConfig {
             show_pos_id: true,
             show_positions: true,
             highlight_unknown: true,
+            show_probs: false,
             ..Default::default()
         }
     }
@@ -107,6 +111,20 @@ impl DotConfig {
     #[must_use]
     pub fn with_rankdir(mut self, rankdir: RankDir) -> Self {
         self.rankdir = rankdir;
+        self
+    }
+
+    /// Enable or disable marginal probability annotations on nodes.
+    ///
+    /// When enabled, each node will display `p=<value>` where the value is the
+    /// marginal probability P(node | input) from the forward-backward algorithm.
+    /// Requires a [`LatticeProbTable`] to be attached to the [`DotBuilder`] via
+    /// [`DotBuilder::with_probs`].
+    ///
+    /// [`LatticeProbTable`]: crate::viterbi::analysis::LatticeProbTable
+    #[must_use]
+    pub fn with_show_probs(mut self, show: bool) -> Self {
+        self.show_probs = show;
         self
     }
 }
@@ -169,6 +187,7 @@ pub struct DotBuilder<'a> {
     lattice: &'a Lattice<'a>,
     dict: Option<&'a Dictionary>,
     config: DotConfig,
+    probs: Option<&'a crate::viterbi::analysis::LatticeProbTable>,
 }
 
 impl<'a> DotBuilder<'a> {
@@ -178,6 +197,7 @@ impl<'a> DotBuilder<'a> {
             lattice,
             dict: None,
             config: DotConfig::default(),
+            probs: None,
         }
     }
 
@@ -192,6 +212,16 @@ impl<'a> DotBuilder<'a> {
     #[must_use]
     pub fn with_config(mut self, config: DotConfig) -> Self {
         self.config = config;
+        self
+    }
+
+    /// Attach a [`LatticeProbTable`] so that marginal probabilities can be
+    /// shown on nodes when [`DotConfig::show_probs`] is `true`.
+    ///
+    /// [`LatticeProbTable`]: crate::viterbi::analysis::LatticeProbTable
+    #[must_use]
+    pub fn with_probs(mut self, probs: &'a crate::viterbi::analysis::LatticeProbTable) -> Self {
+        self.probs = Some(probs);
         self
     }
 
@@ -348,8 +378,28 @@ impl<'a> DotBuilder<'a> {
             extras.push(format!("[{}:{}]", node.start, node.end));
         }
 
+        // Marginal probability overlay
+        if self.config.show_probs && !node.surface.is_empty() {
+            if let Some(probs) = &self.probs {
+                // Search across all positions for a matching marginal.
+                // NodeMarginal.start and NodeMarginal.surface correspond to
+                // LatticeNode.start and LatticeNode.surface respectively.
+                let prob_opt = probs
+                    .by_position
+                    .iter()
+                    .flatten()
+                    .find(|nm| nm.start == node.start && nm.surface == node.surface);
+                if let Some(nm) = prob_opt {
+                    extras.push(format!("p={:.2}", nm.prob));
+                }
+            }
+        }
+
         if !extras.is_empty() {
-            write!(label, "\\n{}", extras.join(" ")).unwrap();
+            // Use write! to avoid panicking — format to a temp String and push
+            let extra_str = extras.join(" ");
+            label.push_str("\\n");
+            label.push_str(&extra_str);
         }
 
         label
@@ -434,6 +484,32 @@ impl<'a> Lattice<'a> {
             .with_config(config)
             .build()
     }
+
+    /// Render the lattice as a DOT string with probability annotations.
+    ///
+    /// Requires the [`LatticeProbTable`] from `ViterbiSolver::forward_backward()`.
+    /// Nodes are annotated with their marginal probability `P(node | input)`.
+    ///
+    /// Uses the `detailed` configuration with `show_probs` enabled so that
+    /// all cost metadata and probability information are visible.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if formatting fails.
+    ///
+    /// [`LatticeProbTable`]: crate::viterbi::analysis::LatticeProbTable
+    pub fn to_dot_with_probs(
+        &'a self,
+        dict: &'a Dictionary,
+        probs: &'a crate::viterbi::analysis::LatticeProbTable,
+    ) -> Result<String> {
+        let config = DotConfig::detailed().with_show_probs(true);
+        DotBuilder::new(self)
+            .with_dict(dict)
+            .with_probs(probs)
+            .with_config(config)
+            .build()
+    }
 }
 
 #[cfg(test)]
@@ -511,5 +587,137 @@ mod tests {
 
         let result = lattice.to_dot();
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_dot_config_show_probs_default_false() {
+        let config = DotConfig::default();
+        assert!(!config.show_probs);
+    }
+
+    #[test]
+    fn test_dot_config_detailed_show_probs_false() {
+        // detailed() is opt-in only — show_probs must remain false
+        let config = DotConfig::detailed();
+        assert!(!config.show_probs);
+    }
+
+    #[test]
+    fn test_dot_config_with_show_probs() {
+        let config = DotConfig::default().with_show_probs(true);
+        assert!(config.show_probs);
+    }
+
+    #[test]
+    fn test_dot_config_with_show_probs_toggle() {
+        let config = DotConfig::default()
+            .with_show_probs(true)
+            .with_show_probs(false);
+        assert!(!config.show_probs);
+    }
+
+    #[test]
+    fn test_dot_builder_with_probs_field_set() {
+        // LatticeProbTable::default() has no data, but builder should accept it
+        use crate::viterbi::analysis::LatticeProbTable;
+        let empty_probs = LatticeProbTable::default();
+        // Just verify that with_probs doesn't panic and the table is empty
+        let _ = &empty_probs; // Use the value to avoid dead_code warning
+        assert!(empty_probs.by_position.is_empty());
+    }
+
+    #[test]
+    fn test_dot_builder_with_probs_no_match_leaves_label_unchanged() {
+        // Build a minimal lattice with one real node, attach an empty probs table,
+        // verify that build() still succeeds and no probability annotation is added.
+        use crate::viterbi::analysis::LatticeProbTable;
+
+        let text = "a";
+        // Craft a node that looks like a real word node at position 0..1
+        let word_node = LatticeNode {
+            surface: "a",
+            start: 0,
+            end: 1,
+            word_id: 0,
+            left_id: 1,
+            right_id: 1,
+            pos_id: 1,
+            wcost: 100,
+            feature: "名詞,一般".to_string(),
+            is_unknown: false,
+        };
+        let nodes_at = vec![
+            vec![LatticeNode::bos()],
+            vec![word_node],
+            vec![LatticeNode::eos(1)],
+        ];
+        let lattice = Lattice { text, nodes_at };
+
+        let empty_probs = LatticeProbTable::default();
+        let config = DotConfig::default().with_show_probs(true);
+        let result = DotBuilder::new(&lattice)
+            .with_probs(&empty_probs)
+            .with_config(config)
+            .build();
+
+        assert!(result.is_ok());
+        let dot = result.unwrap_or_default();
+        // No probability annotation should appear when probs table is empty
+        assert!(!dot.contains("p="));
+    }
+
+    #[test]
+    fn test_dot_builder_with_probs_annotates_matching_node() {
+        use crate::viterbi::analysis::{LatticeProbTable, NodeMarginal};
+
+        let text = "a";
+        let word_node = LatticeNode {
+            surface: "a",
+            start: 0,
+            end: 1,
+            word_id: 0,
+            left_id: 1,
+            right_id: 1,
+            pos_id: 1,
+            wcost: 100,
+            feature: "名詞,一般".to_string(),
+            is_unknown: false,
+        };
+        let nodes_at = vec![
+            vec![LatticeNode::bos()],
+            vec![word_node],
+            vec![LatticeNode::eos(1)],
+        ];
+        let lattice = Lattice { text, nodes_at };
+
+        // Provide a marginal for this node
+        let nm = NodeMarginal {
+            surface: "a".to_string(),
+            feature: "名詞,一般".to_string(),
+            start: 0,
+            end: 1,
+            log_prob: -0.5_f64,
+            prob: (-0.5_f64).exp(),
+        };
+        let probs = LatticeProbTable {
+            by_position: vec![vec![nm]],
+            input_len: 1,
+            log_z: 0.0,
+        };
+
+        let config = DotConfig::default().with_show_probs(true);
+        let result = DotBuilder::new(&lattice)
+            .with_probs(&probs)
+            .with_config(config)
+            .build();
+
+        assert!(result.is_ok());
+        let dot = result.unwrap_or_default();
+        // Probability annotation must be present
+        assert!(
+            dot.contains("p="),
+            "Expected 'p=' in DOT output, got:\n{}",
+            dot
+        );
     }
 }

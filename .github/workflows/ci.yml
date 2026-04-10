@@ -1,0 +1,316 @@
+name: CI
+
+on:
+  push:
+    branches: [ master, "0.*" ]
+  pull_request:
+    branches: [ master ]
+  schedule:
+    # Nightly Rust check — every day at 02:00 UTC
+    - cron: '0 2 * * *'
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  # Explicit feature set that avoids the python cdylib dyld conflict.
+  # "python" activates pyo3/extension-module which produces a cdylib and
+  # causes dyld errors when loaded as an rlib during tests. It is covered
+  # separately by the python-bindings job.
+  SAFE_FEATURES: "simd,server,lsp,parallel,neural"
+
+jobs:
+  # ── Format check ──────────────────────────────────────────────────────────
+  fmt:
+    name: Rustfmt
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+  # ── Core build + test matrix ──────────────────────────────────────────────
+  test:
+    name: Test (${{ matrix.os }}, ${{ matrix.toolchain }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+        toolchain: [stable]
+        include:
+          # Nightly run on ubuntu only (triggered by schedule or push)
+          - os: ubuntu-latest
+            toolchain: nightly
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust ${{ matrix.toolchain }}
+        uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          components: clippy
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ${{ runner.os }}-${{ matrix.toolchain }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-${{ matrix.toolchain }}-cargo-
+            ${{ runner.os }}-stable-cargo-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      # ── Compile checks ──────────────────────────────────────────────────
+
+      - name: Compile check (default features)
+        run: cargo check --all-targets
+
+      - name: Compile check (safe feature set)
+        run: cargo check --all-targets --features "$SAFE_FEATURES"
+
+      - name: Build (no-run) — safe features
+        run: cargo nextest run --features "$SAFE_FEATURES" --no-run
+
+      # ── Tests ───────────────────────────────────────────────────────────
+
+      - name: Run tests (default features)
+        run: cargo nextest run --no-fail-fast
+
+      - name: Run tests (safe feature set)
+        run: cargo nextest run --features "$SAFE_FEATURES" --no-fail-fast
+
+      - name: Run tests — mecrab simd only
+        run: cargo nextest run -p mecrab --features simd --no-fail-fast
+
+      # ── Clippy ──────────────────────────────────────────────────────────
+
+      - name: Clippy (default features)
+        run: cargo clippy --all-targets -- -D warnings
+
+      - name: Clippy (safe feature set)
+        run: cargo clippy --all-targets --features "$SAFE_FEATURES" -- -D warnings
+
+      - name: Clippy — mecrab simd
+        run: cargo clippy -p mecrab --features simd -- -D warnings
+
+      - name: Clippy — kizame server
+        run: cargo clippy -p kizame --features server -- -D warnings
+
+      - name: Clippy — kizame lsp
+        run: cargo clippy -p kizame --features lsp -- -D warnings
+
+  # ── WASM cross-compilation check ──────────────────────────────────────────
+  wasm:
+    name: WASM (wasm32-unknown-unknown)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-wasm-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-wasm-cargo-
+            ubuntu-stable-cargo-
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          version: 'latest'
+
+      - name: cargo check — wasm feature for wasm32 target
+        run: cargo check -p mecrab --target wasm32-unknown-unknown --features wasm
+
+      - name: wasm-pack build (dev profile, no tests needed)
+        working-directory: wasm
+        run: wasm-pack build --dev --target web 2>&1 || true
+        # "|| true" so CI does not fail if wasm/ pkg is still scaffolded;
+        # the cargo check above is the authoritative gate.
+
+  # ── Benchmark compilation check ───────────────────────────────────────────
+  bench-compile:
+    name: Benchmarks compile
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-stable-bench-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-bench-cargo-
+            ubuntu-stable-cargo-
+
+      - name: Compile benchmarks (no-run)
+        run: cargo bench --package mecrab-bench --no-run
+
+  # ── Python bindings build check ───────────────────────────────────────────
+  python-bindings:
+    name: Python bindings (${{ matrix.python-version }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.10", "3.12"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-stable-python-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-python-cargo-
+            ubuntu-stable-cargo-
+
+      - name: Install maturin
+        run: pip install "maturin>=1.4,<2.0"
+
+      - name: Build Python wheel (maturin build)
+        run: maturin build --release --features "python,parallel" --manifest-path mecrab/Cargo.toml
+
+      - name: Install built wheel
+        run: pip install target/wheels/mecrab-*.whl
+
+      - name: Smoke-test Python import
+        run: python -c "import mecrab; print('mecrab imported OK')"
+
+      - name: Run Python test suite (if present)
+        run: |
+          if [ -d python/tests ]; then
+            pip install pytest
+            pytest python/tests -v
+          else
+            echo "No python/tests directory — skipping pytest"
+          fi
+
+  # ── Code coverage (Codecov) ───────────────────────────────────────────────
+  coverage:
+    name: Code Coverage
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: llvm-tools-preview
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-stable-cov-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: |
+            ubuntu-stable-cov-cargo-
+            ubuntu-stable-cargo-
+
+      - name: Install cargo-llvm-cov
+        uses: taiki-e/install-action@cargo-llvm-cov
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Generate coverage report (safe feature set)
+        run: |
+          cargo llvm-cov nextest \
+            --features "$SAFE_FEATURES" \
+            --lcov --output-path lcov.info
+          cargo llvm-cov report \
+            --features "$SAFE_FEATURES" \
+            --summary-only
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          files: lcov.info
+          fail_ci_if_error: false
+          token: ${{ secrets.CODECOV_TOKEN }}
+
+  # ── Nightly Rust dedicated job (scheduled only) ───────────────────────────
+  nightly:
+    name: Nightly Rust sanity check
+    runs-on: ubuntu-latest
+    if: github.event_name == 'schedule'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust nightly
+        uses: dtolnay/rust-toolchain@nightly
+        with:
+          components: clippy, rustfmt
+
+      - name: Cache cargo registry + build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry/index/
+            ~/.cargo/registry/cache/
+            ~/.cargo/git/db/
+            target/
+          key: ubuntu-nightly-cargo-${{ hashFiles('**/Cargo.lock') }}
+          restore-keys: ubuntu-nightly-cargo-
+
+      - name: Install cargo-nextest
+        uses: taiki-e/install-action@nextest
+
+      - name: Build check (nightly, safe features)
+        run: cargo check --all-targets --features "$SAFE_FEATURES"
+
+      - name: Tests (nightly, safe features)
+        run: cargo nextest run --features "$SAFE_FEATURES" --no-fail-fast
+
+      - name: Clippy (nightly, safe features)
+        run: cargo clippy --all-targets --features "$SAFE_FEATURES" -- -D warnings
+        continue-on-error: true
+        # Nightly clippy lints may change; treat as advisory not blocking.

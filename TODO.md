@@ -1,5 +1,22 @@
 # MeCrab Development Roadmap
 
+## v0.3.0 Implemented
+
+### Phase 3.2 - LLM-Ready Output Formats
+- [x] Forward-backward algorithm (LatticeProbTable, NodeMarginal, log_sum_exp)
+- [x] LatticeProb output format (JSON with marginal probabilities)
+- [x] BpeCompatible output format (SentencePiece ▁-marked tokens)
+- [x] parse_with_probs() API
+- [x] Python bindings: parse_bpe(), parse_with_probs()
+- [x] WASM bindings: parse_bpe_compatible(), parse_lattice_prob()
+- [x] kizame CLI: -O latticeprob / -O bpecompatible
+- [x] Lattice DOT visualization with probability overlay
+- [x] LatticeProb vs Viterbi benchmark
+- [x] Reranker overhead benchmarks (NullReranker/CostReranker)
+- [x] word2vec end-to-end integration tests
+- [x] DictionaryProvider comprehensive tests
+- [x] WASM integration test expansion (27 tests)
+
 ## Completed
 
 ### Core Library (mecrab)
@@ -109,6 +126,82 @@
 - [x] Cosine similarity computation
 - [x] Pure Rust implementation with bytemuck
 
+
+## 0.2.0 Implemented
+
+### Core Fixes
+- [x] EOS token bug fix (Issue #1) — backward_pass now correctly identifies EOS entries
+- [x] Hybrid SoA ViterbiTable with hot/cold separation
+
+### SIMD Optimizations
+- [x] ARM NEON (aarch64) batch cost operations
+- [x] x86_64 AVX2/SSE4.1 batch cost operations
+- [x] WebAssembly SIMD128 batch cost operations
+- [x] DAT prefetch hints (aarch64 + x86_64)
+- [x] SIMD batch connection cost lookups (viterbi/simd.rs `batch_connection_costs`)
+- [x] CachedMatrix: 256-slot direct-mapped connection matrix row cache
+- [x] CharDefCached: 256-slot character info lookup cache
+
+### Dictionary
+- [x] DictionaryProvider trait (IPADIC/UniDic/NEologd/Auto)
+- [x] AutoDetect: samples feature count from first dict entry
+- [x] Dictionary::from_bytes — load from raw bytes (WASM support)
+- [x] Direct sys.dic binary generation (MeCab-compatible format)
+
+### Python Bindings (pyo3 0.28)
+- [x] Full sequence protocol (PyAnalysisResult, PyAnalysisResultIterator)
+- [x] GIL-release batch processing (py.detach())
+- [x] python/ submodule structure (analysis/parser/helpers)
+
+### WASM
+- [x] load_dictionary from packed blob (36-byte header format)
+- [x] parse/parse_wakati full pipeline
+- [x] 13 WASM integration tests
+- [x] wasm/pack_dict.js Node.js helper
+
+### Builder (mecrab-builder)
+- [x] Wikipedia abstract integration
+- [x] DBpedia NTriples processor
+- [x] Online entity resolver (Wikidata API)
+- [x] Custom ontology import (CSV/JSON/RDF/XML)
+- [x] Confidence calibration and disambiguation
+- [x] wikidata/ submodule (parser/index/mod)
+- [x] CSV export with URIs
+
+### Batch/Stream API
+- [x] parse_batch_with_progress (parallel, AtomicUsize)
+- [x] parse_iter, wakati_iter (lazy iterators)
+- [x] parse_nbest_batch
+- [x] api/ submodule (batch/iter/format)
+
+### Reranking
+- [x] Reranker trait + NullReranker + CostReranker
+- [x] parse_nbest_with_reranker()
+- [x] NeuralReranker stub (--features neural)
+
+### Corpus/Word2Vec
+- [x] SurfaceVocab + CorpusStats
+- [x] MeCrab::tokenize_for_corpus / tokenize_corpus_lines
+- [x] kizame vectors tokenize command
+
+### LSP (--features lsp)
+- [x] kizame lsp command (tower-lsp)
+- [x] hover (morpheme info), completion, diagnostics (unknown words)
+
+### CLI (kizame)
+- [x] commands/ submodule refactoring
+- [x] --dict-format flag (ipadic/unidic/neologd/auto)
+- [x] serve output format support (json/wakati/dump)
+
+### Benchmarks
+- [x] mecrab-bench/benches/simd.rs — SIMD vs scalar benchmark
+- [x] BenchBaseline regression tracking
+
+### Infrastructure
+- [x] CHANGELOG.md
+- [x] Makefile with clippy-all/build-simd/build-lsp/check-wasm targets
+- [x] CI: simd feature build, lsp feature build, wasm32 cross-check
+
 ## Planned
 
 ### Performance (Priority: Lattice Building Optimization)
@@ -122,24 +215,32 @@
 
 **Optimization: Eliminated feature String clone in lattice building (12% improvement)**
 
-- [ ] SIMD-accelerated DAT traversal
-- [ ] Character info lookup caching
-- [ ] Connection matrix cache-line optimization
-- [ ] AVX-512 Viterbi optimization
-- [ ] Dictionary preloading/caching
-- [ ] Batch parsing API improvements
-- [ ] SoA (Struct of Arrays) layout for Viterbi
+- [x] SIMD-accelerated DAT traversal (prefetch_for_key + warm_cache in double_array_trie.rs)
+- [x] Character info lookup caching
+- [x] Connection matrix cache-line optimization
+- [x] AVX-512 Viterbi optimization (implemented as AVX2/SSE4.1 — the production-relevant x86_64 targets)
+- [x] Dictionary preloading/caching
+- [x] Batch parsing API improvements
+- [x] SoA (Struct of Arrays) layout for Viterbi (ViterbiTable hybrid SoA + CachedMatrix)
 
 ### Features
-- [ ] Online entity resolution (Wikidata API fallback)
-- [ ] Confidence calibration for disambiguation
+- [x] Online entity resolution (Wikidata API fallback)
+- [x] Confidence calibration for disambiguation (calibrated_confidence + recalibrate())
 
 ### Builder
 - [x] SemanticPool binary output (MCV1 format)
-- [ ] Wikipedia abstract integration
-- [ ] Incremental index updates
-- [ ] Delta processing
+- [x] Parallel rayon processing (10k-line chunks, parallel JSON parse)
+- [x] Entity type filtering via P31 claims (entity_type_filter in BuildConfig)
+- [x] POS-based URI filtering (人名/地名/組織/固有名詞 IPADIC mapping)
+- [x] Max-confidence duplicate detection (HashMap<uri, f32> dedup)
+- [x] Wikipedia abstract integration
+- [x] Incremental index updates
+- [x] Delta processing
+- [x] Custom ontology import (CSV / JSON / RDF/XML → WikidataIndex merge, Phase 0)
 
 ### Infrastructure
-- [ ] Benchmark regression tracking
-- [ ] Code coverage reporting
+- [x] Benchmark regression tracking
+- [x] Code coverage reporting (cargo-llvm-cov + Codecov via GitHub Actions CI)
+- [x] GitHub Actions CI (ubuntu + macos matrix, clippy -D warnings, nextest)
+- [x] GitHub Actions release workflow (auto release notes on v* tags, draft)
+- [x] Direct sys.dic generation — DA-trie binary builder implemented in mecrab-builder

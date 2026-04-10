@@ -385,9 +385,172 @@ impl fmt::Display for SegmentationReport {
     }
 }
 
+/// Per-node marginal probability after forward-backward computation.
+///
+/// Represents P(node | input) — the probability that this particular morpheme
+/// appears in the correct segmentation of the input, marginalising over all
+/// other possible segmentations.
+#[derive(Debug, Clone)]
+pub struct NodeMarginal {
+    /// Surface form of this node
+    pub surface: String,
+    /// Feature string
+    pub feature: String,
+    /// Start byte position in input text
+    pub start: usize,
+    /// End byte position in input text
+    pub end: usize,
+    /// Log marginal probability (natural log, will be ≤ 0)
+    pub log_prob: f64,
+    /// Marginal probability (exp of log_prob, in \[0,1\])
+    pub prob: f64,
+}
+
+/// Result of the forward-backward algorithm: per-position node marginals.
+///
+/// For each position in the input, stores all active nodes and their
+/// marginal probabilities P(node | input), computed via the
+/// forward-backward algorithm over the Viterbi lattice.
+///
+/// These marginals can be used for:
+/// - Subword regularization in LLM pre-training
+/// - Uncertainty estimation in morphological disambiguation
+/// - Lattice-based sequence labeling
+#[derive(Debug, Clone, Default)]
+pub struct LatticeProbTable {
+    /// Marginals indexed by byte position (end position index in lattice,
+    /// matching how nodes are stored in the lattice's `nodes_at` array).
+    /// Each entry is a list of nodes at that lattice position (i.e., ending there).
+    pub by_position: Vec<Vec<NodeMarginal>>,
+    /// Total number of input bytes (for bounds checking)
+    pub input_len: usize,
+    /// Log-partition function Z = log(sum of exp(-cost/T) over all paths)
+    pub log_z: f64,
+}
+
+impl LatticeProbTable {
+    /// Return all `NodeMarginal`s for the highest-probability nodes
+    /// at each position (i.e., for each lattice position, the node with the
+    /// highest marginal probability).
+    ///
+    /// These correspond roughly to the Viterbi path's nodes.
+    pub fn best_per_position(&self) -> Vec<&NodeMarginal> {
+        self.by_position
+            .iter()
+            .filter_map(|nodes| {
+                nodes.iter().max_by(|a, b| {
+                    a.log_prob
+                        .partial_cmp(&b.log_prob)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                })
+            })
+            .collect()
+    }
+
+    /// Return all nodes across all positions, sorted by descending marginal probability.
+    pub fn all_nodes_sorted(&self) -> Vec<&NodeMarginal> {
+        let mut all: Vec<&NodeMarginal> = self.by_position.iter().flatten().collect();
+        all.sort_by(|a, b| {
+            b.log_prob
+                .partial_cmp(&a.log_prob)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        all
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn test_node_marginal_fields() {
+        let nm = NodeMarginal {
+            surface: "東京".to_string(),
+            feature: "名詞,固有名詞".to_string(),
+            start: 0,
+            end: 6,
+            log_prob: -0.5_f64,
+            prob: (-0.5_f64).exp(),
+        };
+        assert_eq!(nm.surface, "東京");
+        assert_eq!(nm.start, 0);
+        assert_eq!(nm.end, 6);
+        assert!(nm.prob <= 1.0 && nm.prob >= 0.0);
+    }
+
+    #[test]
+    fn test_lattice_prob_table_default() {
+        let table = LatticeProbTable::default();
+        assert!(table.by_position.is_empty());
+        assert_eq!(table.input_len, 0);
+        assert_eq!(table.log_z, 0.0);
+    }
+
+    #[test]
+    fn test_best_per_position_empty() {
+        let table = LatticeProbTable::default();
+        let best = table.best_per_position();
+        assert!(best.is_empty());
+    }
+
+    #[test]
+    fn test_best_per_position_selects_max_prob() {
+        let nm_high = NodeMarginal {
+            surface: "東京".to_string(),
+            feature: "名詞,固有名詞".to_string(),
+            start: 0,
+            end: 6,
+            log_prob: -0.1_f64,
+            prob: 0.9,
+        };
+        let nm_low = NodeMarginal {
+            surface: "東".to_string(),
+            feature: "名詞,一般".to_string(),
+            start: 0,
+            end: 3,
+            log_prob: -2.0_f64,
+            prob: 0.135,
+        };
+        let table = LatticeProbTable {
+            by_position: vec![vec![nm_high, nm_low]],
+            input_len: 6,
+            log_z: 0.0,
+        };
+        let best = table.best_per_position();
+        assert_eq!(best.len(), 1);
+        assert_eq!(best[0].surface, "東京");
+    }
+
+    #[test]
+    fn test_all_nodes_sorted() {
+        let nm_a = NodeMarginal {
+            surface: "a".to_string(),
+            feature: "".to_string(),
+            start: 0,
+            end: 1,
+            log_prob: -1.0_f64,
+            prob: 0.368,
+        };
+        let nm_b = NodeMarginal {
+            surface: "b".to_string(),
+            feature: "".to_string(),
+            start: 0,
+            end: 1,
+            log_prob: -0.1_f64,
+            prob: 0.905,
+        };
+        let table = LatticeProbTable {
+            by_position: vec![vec![nm_a, nm_b]],
+            input_len: 1,
+            log_z: 0.0,
+        };
+        let sorted = table.all_nodes_sorted();
+        assert_eq!(sorted.len(), 2);
+        // Sorted descending: first should be the higher prob node ("b")
+        assert_eq!(sorted[0].surface, "b");
+        assert_eq!(sorted[1].surface, "a");
+    }
 
     #[test]
     fn test_morpheme_cost() {

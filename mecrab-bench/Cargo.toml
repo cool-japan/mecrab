@@ -16,7 +16,9 @@ description = "Benchmark suite for MeCrab morphological analyzer"
 publish = false
 
 [dependencies]
-mecrab = { path = "../mecrab" }
+mecrab = { path = "../mecrab", features = ["simd"] }
+serde.workspace = true
+serde_json.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
@@ -31,4 +33,16 @@ harness = false
 
 [[bench]]
 name = "dictionary"
+harness = false
+
+[[bench]]
+name = "simd"
+harness = false
+
+[[bench]]
+name = "rerank"
+harness = false
+
+[[bench]]
+name = "latticeprob"
 harness = false

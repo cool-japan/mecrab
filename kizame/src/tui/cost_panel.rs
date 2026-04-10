@@ -19,15 +19,23 @@ pub struct CostPanel<'a> {
     session: &'a DebugSession,
     selected_pos: usize,
     selected_idx: usize,
+    /// Whether to render marginal probability rows
+    show_probs: bool,
 }
 
 impl<'a> CostPanel<'a> {
     /// Create a new cost panel
-    pub fn new(session: &'a DebugSession, selected_pos: usize, selected_idx: usize) -> Self {
+    pub fn new(
+        session: &'a DebugSession,
+        selected_pos: usize,
+        selected_idx: usize,
+        show_probs: bool,
+    ) -> Self {
         Self {
             session,
             selected_pos,
             selected_idx,
+            show_probs,
         }
     }
 
@@ -121,6 +129,35 @@ impl<'a> CostPanel<'a> {
                     entry.cumulative_cost,
                     Color::Green,
                 ));
+
+                // Show marginal probability when --show-probs is active
+                if self.show_probs {
+                    if let Some(prob) = self
+                        .session
+                        .get_node_prob(self.selected_pos, self.selected_idx)
+                    {
+                        lines.push(Line::from(vec![
+                            Span::styled("Prob: ", Style::default().fg(Color::DarkGray)),
+                            Span::styled(
+                                format!("{:.4}", prob),
+                                Style::default()
+                                    .fg(if prob >= 0.5 {
+                                        Color::Green
+                                    } else if prob >= 0.1 {
+                                        Color::Yellow
+                                    } else {
+                                        Color::Red
+                                    })
+                                    .add_modifier(Modifier::BOLD),
+                            ),
+                        ]));
+                    } else {
+                        lines.push(Line::from(vec![Span::styled(
+                            "Prob: N/A",
+                            Style::default().fg(Color::DarkGray),
+                        )]));
+                    }
+                }
 
                 // Show predecessor
                 if let Some((prev_pos, prev_idx)) = entry.prev {

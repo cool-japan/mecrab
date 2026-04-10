@@ -13,10 +13,10 @@ categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 # Core library
-mecrab = { version = "0.1.0", path = "../mecrab", features = ["json", "parallel"] }
+mecrab = { version = "0.2.0", path = "../mecrab", features = ["json", "parallel"] }
 
 # Word2Vec training
-mecrab-word2vec = { version = "0.1.0", path = "../mecrab-word2vec" }
+mecrab-word2vec = { version = "0.2.0", path = "../mecrab-word2vec" }
 
 # CLI framework
 clap.workspace = true
@@ -25,7 +25,7 @@ clap.workspace = true
 dirs = "6.0"
 
 # Optional: Heavy data pipeline (Wikidata processing)
-mecrab-builder = { version = "0.1.0", path = "../mecrab-builder", optional = true }
+mecrab-builder = { version = "0.2.0", path = "../mecrab-builder", optional = true }
 
 # Progress bars (lightweight, always included for dict info)
 indicatif.workspace = true
@@ -45,12 +45,18 @@ tower-http = { version = "0.6", features = ["trace", "cors"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 
+# LSP server (optional)
+tower-lsp = { version = "0.20", optional = true }
+dashmap = { version = "6.1", optional = true }
+
 [features]
 default = []
 # Enable `kizame build` command with Wikidata pipeline
 full = ["mecrab-builder"]
 # Enable HTTP server mode
 server = ["axum", "tokio", "tower", "tower-http", "serde", "serde_json"]
+# Enable LSP server mode
+lsp = ["dep:tower-lsp", "dep:dashmap", "tokio"]
 
 [[bin]]
 name = "kizame"

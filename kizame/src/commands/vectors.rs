@@ -1,0 +1,606 @@
+//! Vectors command - word embedding management subcommands
+//!
+//! Copyright 2026 COOLJAPAN OU (Team KitaSan)
+
+use clap::Subcommand;
+use std::path::{Path, PathBuf};
+
+#[derive(Subcommand)]
+pub enum VectorsCommands {
+    /// Train Word2Vec embeddings from corpus
+    Train {
+        /// Input corpus file (space-separated word_ids per line)
+        #[arg(short = 'i', long)]
+        input: PathBuf,
+
+        /// Output file (word2vec text format)
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+
+        /// Embedding vector size
+        #[arg(long, default_value = "100")]
+        size: usize,
+
+        /// Context window size
+        #[arg(long, default_value = "5")]
+        window: usize,
+
+        /// Number of negative samples
+        #[arg(long, default_value = "5")]
+        negative: usize,
+
+        /// Minimum word count
+        #[arg(long, default_value = "10")]
+        min_count: u64,
+
+        /// Subsampling threshold (1e-4 = 0.0001)
+        #[arg(long, default_value = "0.0001")]
+        sample: f64,
+
+        /// Initial learning rate
+        #[arg(long, default_value = "0.025")]
+        alpha: f32,
+
+        /// Minimum learning rate
+        #[arg(long, default_value = "0.0001")]
+        min_alpha: f32,
+
+        /// Number of training epochs
+        #[arg(long, default_value = "3")]
+        epochs: usize,
+
+        /// Number of threads
+        #[arg(long, default_value = "8")]
+        threads: usize,
+
+        /// Output format (text or mcv1)
+        #[arg(short = 'f', long, default_value = "text")]
+        format: String,
+
+        /// For MCV1 output: maximum word_id in IPADIC
+        #[arg(long)]
+        max_word_id: Option<u32>,
+    },
+    /// Convert word2vec/fastText format to MCV1 binary format
+    Convert {
+        /// Input file (word2vec text format or gensim KeyedVectors)
+        #[arg(short = 'i', long)]
+        input: PathBuf,
+
+        /// Output file (MCV1 binary format)
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+
+        /// Input format (word2vec-text, gensim)
+        #[arg(short = 'f', long, default_value = "word2vec-text")]
+        format: String,
+
+        /// Vocabulary file (`word_id<TAB>feature`) from dict dump --vocab
+        #[arg(short = 'v', long)]
+        vocab: Option<PathBuf>,
+    },
+    /// Show vector pool information
+    Info {
+        /// Vector pool file
+        #[arg(short = 'v', long)]
+        vector_pool: PathBuf,
+    },
+    /// Tokenize a raw text file into a word-ID corpus for Word2Vec training
+    ///
+    /// Reads `input` line-by-line, tokenizes each line with MeCrab, and
+    /// writes one sentence per line of space-separated word IDs to `output`.
+    /// The surface-to-ID mapping is saved as a TSV to `vocab-out`.
+    Tokenize {
+        /// Input text file (UTF-8, one sentence per line recommended)
+        #[arg(short = 'i', long)]
+        input: PathBuf,
+
+        /// Output corpus file (word_id sequences, one per line)
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+
+        /// Output companion vocab TSV file (word_id<TAB>surface) alongside the corpus
+        #[arg(long = "vocab-out")]
+        vocab_out: Option<PathBuf>,
+
+        /// Path to MeCab dictionary directory (uses default search paths when
+        /// omitted)
+        #[arg(short = 'd', long)]
+        dict: Option<PathBuf>,
+    },
+    /// Query word embeddings for similar words (k-NN search)
+    Query {
+        /// Vector store file (MCV1 format)
+        #[arg(short = 'v', long)]
+        vectors: PathBuf,
+
+        /// Query word (will be parsed to get its word vector)
+        #[arg(required = true)]
+        word: String,
+
+        /// Number of results to return
+        #[arg(short = 'n', long, default_value = "10")]
+        topn: usize,
+
+        /// Optional vocab file (word_id<TAB>surface) for labeling results
+        #[arg(long)]
+        vocab: Option<PathBuf>,
+
+        /// Dictionary directory
+        #[arg(short = 'd', long)]
+        dicdir: Option<PathBuf>,
+    },
+}
+
+pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::Error>> {
+    match command {
+        VectorsCommands::Train {
+            input,
+            output,
+            size,
+            window,
+            negative,
+            min_count,
+            sample,
+            alpha,
+            min_alpha,
+            epochs,
+            threads,
+            format,
+            max_word_id,
+        } => run_vectors_train(
+            &input,
+            &output,
+            size,
+            window,
+            negative,
+            min_count,
+            sample,
+            alpha,
+            min_alpha,
+            epochs,
+            threads,
+            &format,
+            max_word_id,
+        ),
+        VectorsCommands::Convert {
+            input,
+            output,
+            format,
+            vocab,
+        } => run_vectors_convert(&input, &output, &format, vocab.as_deref()),
+        VectorsCommands::Info { vector_pool } => run_vectors_info(&vector_pool),
+        VectorsCommands::Tokenize {
+            input,
+            output,
+            vocab_out,
+            dict,
+        } => run_vectors_tokenize(&input, &output, vocab_out.as_deref(), dict.as_deref()),
+        VectorsCommands::Query {
+            vectors,
+            word,
+            topn,
+            vocab,
+            dicdir,
+        } => run_vectors_query(&vectors, &word, topn, vocab.as_ref(), dicdir),
+    }
+}
+
+fn run_vectors_info(vector_pool: &Path) -> Result<(), Box<dyn std::error::Error>> {
+    use mecrab::vectors::VectorStore;
+    use std::fs::File;
+    use std::sync::Arc;
+
+    println!("Vector Pool Information: {:?}", vector_pool);
+    println!("================================================================================");
+    println!();
+
+    let file = File::open(vector_pool)?;
+    let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
+    let store = VectorStore::from_mmap(Arc::new(mmap))?;
+
+    println!("Vocab size:  {}", store.vocab_size());
+    println!("Dimensions:  {}", store.dim());
+    println!(
+        "File size:   {} bytes",
+        std::fs::metadata(vector_pool)?.len()
+    );
+
+    Ok(())
+}
+
+fn run_vectors_convert(
+    input: &Path,
+    output: &Path,
+    format: &str,
+    vocab: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use std::collections::HashMap;
+    use std::fs::File;
+    use std::io::{BufRead, BufReader, Write};
+
+    match format {
+        "word2vec-text" => {
+            eprintln!("Converting word2vec text format to MCV1...");
+            eprintln!();
+
+            // Step 1: Load vocabulary mapping (surface → word_id)
+            let surface_to_word_id: HashMap<String, u32> = if let Some(vocab_path) = vocab {
+                eprintln!("Loading vocabulary from {:?}...", vocab_path);
+                let file = File::open(vocab_path)?;
+                let reader = BufReader::new(file);
+                let mut map = HashMap::new();
+
+                for line in reader.lines() {
+                    let line = line?;
+                    if line.starts_with('#') || line.trim().is_empty() {
+                        continue;
+                    }
+
+                    let parts: Vec<&str> = line.split('\t').collect();
+                    if parts.len() >= 2 {
+                        let word_id: u32 = parts[0].parse()?;
+                        // Extract surface from feature string (index 6)
+                        let features: Vec<&str> = parts[1].split(',').collect();
+                        if let Some(surface) = features.get(6) {
+                            if *surface != "*" {
+                                map.insert(surface.to_string(), word_id);
+                            }
+                        }
+                    }
+                }
+
+                eprintln!("  Loaded {} surface forms", map.len());
+                map
+            } else {
+                return Err("vocab file required for word2vec-text format".into());
+            };
+
+            // Step 2: Read word2vec text format
+            eprintln!("Reading word2vec file {:?}...", input);
+            let file = File::open(input)?;
+            let reader = BufReader::new(file);
+            let mut lines = reader.lines();
+
+            // Read header: vocab_size dim
+            let header = lines.next().ok_or("Empty word2vec file")??;
+            let header_parts: Vec<&str> = header.split_whitespace().collect();
+            if header_parts.len() != 2 {
+                return Err("Invalid word2vec header format".into());
+            }
+
+            let _w2v_vocab_size: usize = header_parts[0].parse()?;
+            let dim: usize = header_parts[1].parse()?;
+            eprintln!("  Dimensions: {}", dim);
+
+            // Determine max word_id for output vocab_size
+            let max_word_id = surface_to_word_id.values().max().copied().unwrap_or(0);
+            let vocab_size = (max_word_id + 1) as usize;
+            eprintln!(
+                "  Output vocab size: {} (max word_id: {})",
+                vocab_size, max_word_id
+            );
+
+            // Initialize vectors array (all zeros)
+            let mut vectors: Vec<f32> = vec![0.0; vocab_size * dim];
+
+            // Read vectors
+            let mut mapped_count = 0;
+            let mut unmapped_count = 0;
+
+            for line in lines {
+                let line = line?;
+                if line.trim().is_empty() {
+                    continue;
+                }
+
+                let parts: Vec<&str> = line.split_whitespace().collect();
+                if parts.len() != dim + 1 {
+                    eprintln!("  Warning: skipping malformed line");
+                    continue;
+                }
+
+                let surface = parts[0];
+                let values: Result<Vec<f32>, _> = parts[1..].iter().map(|s| s.parse()).collect();
+
+                match values {
+                    Ok(vals) => {
+                        if let Some(&word_id) = surface_to_word_id.get(surface) {
+                            let idx = word_id as usize * dim;
+                            if idx + dim <= vectors.len() {
+                                vectors[idx..idx + dim].copy_from_slice(&vals);
+                                mapped_count += 1;
+                            }
+                        } else {
+                            unmapped_count += 1;
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("  Warning: failed to parse vector for '{}': {}", surface, e);
+                    }
+                }
+            }
+
+            eprintln!();
+            eprintln!("Mapping summary:");
+            eprintln!("  Mapped:   {} words", mapped_count);
+            eprintln!("  Unmapped: {} words (not in IPADIC)", unmapped_count);
+            eprintln!();
+
+            // Step 3: Write MCV1 format
+            eprintln!("Writing MCV1 format to {:?}...", output);
+            let mut file = File::create(output)?;
+
+            // Write header (32 bytes)
+            file.write_all(&0x3143564Du32.to_le_bytes())?; // Magic: MCV1
+            file.write_all(&(vocab_size as u32).to_le_bytes())?; // Vocab size
+            file.write_all(&(dim as u32).to_le_bytes())?; // Dimension
+            file.write_all(&0u32.to_le_bytes())?; // Data type: F32
+            file.write_all(&[0u8; 16])?; // Reserved
+
+            // Write vectors
+            for value in &vectors {
+                file.write_all(&value.to_le_bytes())?;
+            }
+
+            let file_size = std::fs::metadata(output)?.len();
+            eprintln!(
+                "  Wrote {} bytes ({} MB)",
+                file_size,
+                file_size / 1024 / 1024
+            );
+            eprintln!();
+            eprintln!("✓ Conversion complete!");
+
+            Ok(())
+        }
+        _ => Err(format!("Unsupported format: {}. Supported: word2vec-text", format).into()),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn run_vectors_train(
+    input: &Path,
+    output: &Path,
+    size: usize,
+    window: usize,
+    negative: usize,
+    min_count: u64,
+    sample: f64,
+    alpha: f32,
+    min_alpha: f32,
+    epochs: usize,
+    threads: usize,
+    format: &str,
+    max_word_id: Option<u32>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mecrab_word2vec::Word2VecBuilder;
+
+    eprintln!("Training Word2Vec model...");
+    eprintln!("  Input: {:?}", input);
+    eprintln!("  Output: {:?}", output);
+    eprintln!("  Vector size: {}", size);
+    eprintln!("  Window: {}", window);
+    eprintln!("  Negative samples: {}", negative);
+    eprintln!("  Min count: {}", min_count);
+    eprintln!("  Sample: {}", sample);
+    eprintln!("  Alpha: {} → {}", alpha, min_alpha);
+    eprintln!("  Epochs: {}", epochs);
+    eprintln!("  Threads: {}", threads);
+    eprintln!();
+
+    // Build model
+    let mut model = Word2VecBuilder::new()
+        .vector_size(size)
+        .window_size(window)
+        .negative_samples(negative)
+        .min_count(min_count)
+        .sample(sample)
+        .alpha(alpha)
+        .min_alpha(min_alpha)
+        .epochs(epochs)
+        .threads(threads)
+        .build_from_corpus(input)?;
+
+    // Train
+    model.train_from_file(input)?;
+
+    // Save
+    match format {
+        "text" | "word2vec-text" => {
+            eprintln!("\nSaving word2vec text format...");
+            model.save_text(output)?;
+        }
+        "mcv1" => {
+            eprintln!("\nSaving MCV1 binary format...");
+            let max_id = max_word_id.ok_or("--max-word-id required for MCV1 format")?;
+            model.save_mcv1(output, max_id)?;
+        }
+        _ => {
+            return Err(format!(
+                "Unsupported output format: {}. Supported: text, mcv1",
+                format
+            )
+            .into());
+        }
+    }
+
+    eprintln!();
+    eprintln!("Training complete!");
+
+    Ok(())
+}
+
+fn run_vectors_tokenize(
+    input: &Path,
+    output: &Path,
+    vocab_out: Option<&Path>,
+    dict: Option<&Path>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mecrab::MeCrab;
+    use mecrab::corpus::{CorpusStats, SurfaceVocab};
+    use std::fs::File;
+    use std::io::{BufReader, BufWriter};
+
+    eprintln!("MeCrab corpus tokenizer");
+    eprintln!("  Input:     {:?}", input);
+    eprintln!("  Output:    {:?}", output);
+    if let Some(vp) = vocab_out {
+        eprintln!("  Vocab out: {:?}", vp);
+    }
+    eprintln!();
+
+    // Build MeCrab instance
+    let mecrab = {
+        let mut builder = MeCrab::builder();
+        if let Some(dict_path) = dict {
+            builder = builder.dicdir(Some(dict_path.to_path_buf()));
+        }
+        builder.build()?
+    };
+
+    // Open I/O handles
+    let in_file = File::open(input)?;
+    let reader = BufReader::new(in_file);
+
+    let out_file = File::create(output)?;
+    let mut writer = BufWriter::new(out_file);
+
+    let mut vocab = SurfaceVocab::new();
+    let mut stats = CorpusStats::default();
+
+    // Tokenize all lines
+    mecrab.tokenize_corpus_lines(reader, &mut vocab, &mut writer, &mut stats)?;
+
+    // Flush output
+    use std::io::Write as _;
+    writer.flush()?;
+
+    // Save vocabulary if requested
+    if let Some(vocab_path) = vocab_out {
+        let vocab_file = File::create(vocab_path)?;
+        let vocab_writer = BufWriter::new(vocab_file);
+        vocab.save(vocab_writer)?;
+        eprintln!("  Vocab file:     {:?}", vocab_path);
+    }
+
+    // Report stats
+    eprintln!("Tokenization complete");
+    eprintln!("  Sentences:      {}", stats.sentences);
+    eprintln!("  Tokens:         {}", stats.tokens);
+    eprintln!("  Unknown tokens: {}", stats.unknown_tokens);
+    eprintln!("  Vocab size:     {}", stats.vocab_size);
+
+    Ok(())
+}
+
+fn run_vectors_query(
+    vectors: &PathBuf,
+    word: &str,
+    topn: usize,
+    vocab: Option<&PathBuf>,
+    dicdir: Option<PathBuf>,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mecrab::MeCrab;
+    use mecrab::vectors::VectorStore;
+
+    // Load vector store (with optional vocab index for surface labeling)
+    let store = if let Some(vocab_path) = vocab {
+        VectorStore::from_file_with_vocab(vectors, vocab_path)?
+    } else {
+        VectorStore::from_file(vectors)?
+    };
+
+    // Load MeCrab for parsing the query word into morphemes
+    let mecrab = MeCrab::builder()
+        .dicdir(dicdir)
+        .build()
+        .map_err(|e| format!("Failed to load dictionary: {e}"))?;
+
+    // Parse the query word to find its word_id
+    let result = mecrab.parse(word)?;
+
+    let query_morpheme = result
+        .morphemes
+        .iter()
+        .find(|m| m.surface != "EOS" && !m.surface.trim().is_empty())
+        .ok_or_else(|| format!("Could not parse query word: '{word}'"))?;
+
+    let query_word_id = query_morpheme.word_id;
+    let query_vec = store
+        .get(query_word_id)
+        .ok_or_else(|| {
+            format!("No embedding for word '{word}' (word_id={query_word_id}). Try training vectors first.")
+        })?
+        .to_vec();
+
+    let results = store.most_similar_by_vec(&query_vec, topn, &[query_word_id]);
+
+    println!("Most similar to '{}' (word_id={}):", word, query_word_id);
+    println!("{:<40} {:>8}", "Word", "Score");
+    println!("{}", "-".repeat(50));
+
+    for (word_id, score) in &results {
+        let label = store
+            .surface_of(*word_id)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|| format!("word_id:{}", word_id));
+        println!("{:<40} {:>8.4}", label, score);
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_vectors_commands_have_query() {
+        // Verify the Query variant exists and can be constructed
+        let cmd = VectorsCommands::Query {
+            vectors: std::path::PathBuf::from("test.bin"),
+            word: "東京".to_string(),
+            topn: 10,
+            vocab: None,
+            dicdir: None,
+        };
+        assert!(matches!(cmd, VectorsCommands::Query { .. }));
+    }
+
+    #[test]
+    fn test_tokenize_vocab_out_is_optional() {
+        // Verify that Tokenize can be constructed without vocab_out
+        let cmd = VectorsCommands::Tokenize {
+            input: std::path::PathBuf::from("input.txt"),
+            output: std::path::PathBuf::from("output.corpus"),
+            vocab_out: None,
+            dict: None,
+        };
+        assert!(matches!(
+            cmd,
+            VectorsCommands::Tokenize {
+                vocab_out: None,
+                ..
+            }
+        ));
+    }
+
+    #[test]
+    fn test_tokenize_vocab_out_with_path() {
+        // Verify that Tokenize can be constructed with vocab_out
+        let cmd = VectorsCommands::Tokenize {
+            input: std::path::PathBuf::from("input.txt"),
+            output: std::path::PathBuf::from("output.corpus"),
+            vocab_out: Some(std::path::PathBuf::from("vocab.tsv")),
+            dict: None,
+        };
+        assert!(matches!(
+            cmd,
+            VectorsCommands::Tokenize {
+                vocab_out: Some(_),
+                ..
+            }
+        ));
+    }
+}

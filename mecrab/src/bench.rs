@@ -630,8 +630,8 @@ impl Histogram {
         }
 
         // Value out of range, put in last bucket
-        if !self.buckets.is_empty() {
-            *self.buckets.last_mut().unwrap() += 1;
+        if let Some(last) = self.buckets.last_mut() {
+            *last += 1;
         }
     }
 

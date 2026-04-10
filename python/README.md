@@ -600,11 +600,187 @@ print(f"Similarity: {sim:.3f}")  # => 0.123 (low similarity)
 
 ---
 
+##### `parse_to_morphemes(text: str) -> List[Morpheme]`
+
+Parse text and return list of Morpheme objects with rich properties.
+
+**Parameters:**
+- `text`: Input text to analyze
+
+**Returns:** List of Morpheme objects
+
+**Example:**
+```python
+morphemes = m.parse_to_morphemes("東京に行く")
+for morph in morphemes:
+    if morph.is_noun():
+        print(f"Noun: {morph.surface} ({morph.reading})")
+```
+
+---
+
+##### `parse_nbest(text: str, n: int = 5) -> List[Tuple[List[Dict], int]]`
+
+Parse text and return N-best analyses ranked by cost.
+
+**Parameters:**
+- `text`: Input text to analyze
+- `n`: Number of best paths to return (default: 5)
+
+**Returns:** List of (morphemes, cost) tuples sorted by cost
+
+**Example:**
+```python
+results = m.parse_nbest("すもももももももものうち", n=3)
+for morphemes, cost in results:
+    print(f"Cost: {cost}")
+```
+
+---
+
+##### `parse_json(text: str) -> str`
+
+Parse text and return JSON string.
+
+**Parameters:**
+- `text`: Input text to analyze
+
+**Returns:** JSON string
+
+---
+
+##### `parse_jsonld(text: str) -> str`
+
+Parse text and return JSON-LD string with semantic annotations.
+
+**Parameters:**
+- `text`: Input text to analyze
+
+**Returns:** JSON-LD string
+
+---
+
+##### `sentence_embedding(text: str) -> List[float]`
+
+**Requires:** `vector_path` in constructor
+
+Get sentence embedding via mean pooling of word vectors.
+
+**Parameters:**
+- `text`: Input text
+
+**Returns:** List of floats (embedding vector)
+
+**Example:**
+```python
+m = mecrab.MeCrab(vector_path="vectors.bin")
+emb = m.sentence_embedding("東京に行く")
+print(f"Dimension: {len(emb)}")
+```
+
+---
+
+##### `parse_batch_to_morphemes(texts: List[str]) -> List[List[Morpheme]]`
+
+Parse multiple texts and return Morpheme objects in batch.
+
+**Parameters:**
+- `texts`: List of texts to analyze
+
+**Returns:** List of lists of Morpheme objects
+
+---
+
+##### `parse_batch_to_dict(texts: List[str]) -> List[List[Dict]]`
+
+Parse multiple texts and return dictionaries in batch.
+
+**Parameters:**
+- `texts`: List of texts to analyze
+
+**Returns:** List of lists of dictionaries
+
+---
+
+##### `dict_info() -> Dict`
+
+Get dictionary information.
+
+**Returns:** Dictionary with keys: `overlay_size`, `has_vectors`, `with_ipa`
+
+---
+
+##### Properties
+
+- `has_vectors: bool` - Check if vector support is enabled
+- `has_ipa: bool` - Check if IPA support is enabled
+
+---
+
+### `mecrab.Morpheme`
+
+A morpheme object with rich properties and helper methods.
+
+#### Properties
+
+| Property | Type | Description |
+|----------|------|-------------|
+| `surface` | `str` | Surface form (actual text) |
+| `feature` | `str` | Full feature string (comma-separated) |
+| `pos` | `str` | Part-of-speech (main category) |
+| `pos1`, `pos2`, `pos3` | `Optional[str]` | POS subcategories |
+| `inflection` | `Optional[str]` | Conjugation type |
+| `conjugation` | `Optional[str]` | Conjugation form |
+| `base` | `Optional[str]` | Base form (lemma) |
+| `reading` | `Optional[str]` | Reading (katakana) |
+| `pronunciation` | `Optional[str]` | Pronunciation (katakana) |
+| `ipa` | `Optional[str]` | IPA pronunciation (if enabled) |
+| `embedding` | `Optional[List[float]]` | Word embedding (if enabled) |
+| `pos_id` | `int` | Part-of-speech ID |
+| `wcost` | `int` | Word cost |
+| `word_id` | `int` | Word ID for vector lookup |
+
+#### Methods
+
+| Method | Returns | Description |
+|--------|---------|-------------|
+| `is_noun()` | `bool` | Check if morpheme is a noun (名詞) |
+| `is_verb()` | `bool` | Check if morpheme is a verb (動詞) |
+| `is_adjective()` | `bool` | Check if morpheme is an adjective (形容詞) |
+| `is_particle()` | `bool` | Check if morpheme is a particle (助詞) |
+| `is_auxiliary()` | `bool` | Check if morpheme is an auxiliary verb (助動詞) |
+| `is_symbol()` | `bool` | Check if morpheme is a symbol (記号) |
+| `to_dict()` | `Dict` | Convert to dictionary |
+
+---
+
 ### `mecrab.version() -> str`
 
 Get MeCrab version string.
 
-**Returns:** Version string (e.g., "0.1.0")
+**Returns:** Version string (e.g., "0.2.0")
+
+---
+
+### `mecrab.default_dicdir() -> Optional[str]`
+
+Get default dictionary path.
+
+**Returns:** Dictionary path if found, None otherwise
+
+---
+
+### `mecrab.cosine_similarity(a: List[float], b: List[float]) -> float`
+
+Compute cosine similarity between two vectors.
+
+**Parameters:**
+- `a`: First vector
+- `b`: Second vector
+
+**Returns:** Cosine similarity in range [-1.0, 1.0]
+
+**Raises:** `ValueError` if vectors have different dimensions or are zero
 
 ## Feature Flags
 
@@ -633,6 +809,134 @@ Benchmark comparison (10,000 sentences):
 
 MeCrab Python bindings with batch processing achieve near-C++ performance while maintaining Python's ease of use.
 
+## Enhanced Features (New in v0.2.0)
+
+### Morpheme Objects
+
+Get rich Morpheme objects with helper methods:
+
+```python
+morphemes = m.parse_to_morphemes("東京に行く")
+for morph in morphemes:
+    print(f"{morph.surface}: pos={morph.pos}, reading={morph.reading}")
+
+    # POS helper methods
+    if morph.is_noun():
+        print(f"  Noun: {morph.surface}")
+    if morph.is_verb():
+        print(f"  Verb: {morph.base}")  # lemma form
+
+    # Convert to dict if needed
+    d = morph.to_dict()
+```
+
+### N-best Analysis
+
+Get alternative analyses ranked by cost:
+
+```python
+# Get top 5 alternative analyses
+results = m.parse_nbest("すもももももももものうち", n=5)
+for morphemes, cost in results:
+    surfaces = [m['surface'] for m in morphemes]
+    print(f"Cost: {cost:6d} | {' / '.join(surfaces)}")
+```
+
+### JSON Output
+
+Export as JSON or JSON-LD:
+
+```python
+import json
+
+# Simple JSON
+json_str = m.parse_json("東京に行く")
+data = json.loads(json_str)
+print(data[0]['surface'])  # => "東京"
+
+# JSON-LD with semantic context
+jsonld_str = m.parse_jsonld("東京に行く")
+print(jsonld_str)  # => {"@context": {...}, "tokens": [...]}
+```
+
+### Sentence Embeddings
+
+Get sentence-level embeddings via mean pooling:
+
+```python
+m = mecrab.MeCrab(vector_path="vectors.bin")
+
+# Get sentence embedding
+emb = m.sentence_embedding("東京に行く")
+print(f"Dimension: {len(emb)}")  # => 100 (or your vector size)
+
+# Use for similarity between sentences
+emb1 = m.sentence_embedding("東京に行く")
+emb2 = m.sentence_embedding("京都に行く")
+sim = mecrab.cosine_similarity(emb1, emb2)
+print(f"Sentence similarity: {sim:.3f}")
+```
+
+### Batch Processing with Rich Output
+
+Process batches and get rich output:
+
+```python
+texts = ["東京に行く", "京都で食べる", "大阪を歩く"]
+
+# Batch with Morpheme objects
+for morphemes in m.parse_batch_to_morphemes(texts):
+    nouns = [m.surface for m in morphemes if m.is_noun()]
+    print(f"Nouns: {nouns}")
+
+# Batch with dicts
+for dicts in m.parse_batch_to_dict(texts):
+    print([d['surface'] for d in dicts])
+```
+
+### Context Manager Support
+
+Use with statement for resource management:
+
+```python
+with mecrab.MeCrab() as m:
+    result = m.parse("こんにちは")
+    print(result)
+# Resources automatically cleaned up
+```
+
+### Dictionary Info
+
+Get information about loaded dictionaries:
+
+```python
+info = m.dict_info()
+print(f"Overlay size: {info['overlay_size']}")
+print(f"Has vectors: {info['has_vectors']}")
+print(f"IPA enabled: {info['with_ipa']}")
+
+# Property access
+print(f"Has vectors: {m.has_vectors}")
+print(f"Has IPA: {m.has_ipa}")
+```
+
+### Module-level Functions
+
+```python
+import mecrab
+
+# Get version
+print(mecrab.version())  # => "0.2.0"
+
+# Find default dictionary path
+dicdir = mecrab.default_dicdir()
+print(f"Dictionary at: {dicdir}")
+
+# Compute cosine similarity between vectors
+sim = mecrab.cosine_similarity([1.0, 0.0], [0.707, 0.707])
+print(f"Similarity: {sim:.3f}")
+```
+
 ## Limitations & Future Work
 
 ### Current Limitations
@@ -640,46 +944,23 @@ MeCrab Python bindings with batch processing achieve near-C++ performance while 
 1. **Vector training required separately**
    - Use `mecrab-word2vec` CLI tool to train embeddings
    - Vectors must be indexed by dictionary word_ids
-   - Future: Direct Python API for these features
 
-2. **No JSON-LD output from Python API**
-   - Use CLI for JSON-LD with semantic URIs
-   - Future: Native JSON output methods
+2. **most_similar() and analogy() not yet fully implemented**
+   - Requires vocabulary iteration
+   - Use `similarity()` for pairwise comparison instead
+   - Use `sentence_embedding()` with external ANN index for most_similar
 
-### Planned Enhancements
+### Future Enhancements
 
 ```python
 # Future API (roadmap)
-m = mecrab.MeCrab(
-    dicdir="/var/lib/mecab/dic/ipadic-utf8",
-    with_ipa=True,                    # Enable IPA pronunciation
-    vector_path="vectors.bin",        # Load word embeddings
-    semantic_pool="semantic.bin"      # Load semantic URIs
-)
-
-# Parse to dictionary (Pythonic API)
-result = m.parse_to_dict("東京に行く")
-# => [
-#   {
-#     'surface': '東京',
-#     'pos': '名詞',
-#     'pos_detail': ['固有名詞', '地域', '一般'],
-#     'reading': 'トウキョウ',
-#     'pronunciation': 'トーキョー',
-#     'ipa': '/toːkʲoː/',
-#     'embedding': array([0.1, -0.2, 0.3, ...]),
-#     'semantic_uri': 'http://www.wikidata.org/entity/Q1490',
-#     'wcost': 3003
-#   },
-#   ...
-# ]
-
-# Semantic similarity
-similar = m.most_similar("東京", top_n=10)
+# Full most_similar with ANN index
+similar = m.most_similar("東京", topn=10)
 # => [('京都', 0.85), ('大阪', 0.82), ...]
 
-# JSON-LD export
-json_ld = m.parse_to_jsonld("東京に行く")
+# Word analogy
+result = m.analogy("王様", "男", "女", topn=5)
+# => [('女王', 0.92), ...]
 ```
 
 ## Troubleshooting

@@ -10,6 +10,8 @@ use std::collections::HashMap;
 use crate::Result;
 use crate::dict::Dictionary;
 use crate::lattice::{Lattice, LatticeNode};
+use crate::viterbi::ViterbiSolver;
+use crate::viterbi::analysis::LatticeProbTable;
 
 /// A debug node representing a lattice node with computed costs
 #[derive(Debug, Clone)]
@@ -107,6 +109,8 @@ pub struct DebugSession {
     pub best_path_cost: i64,
     /// Alternative paths (if computed)
     pub alternative_paths: Vec<(Vec<(usize, usize)>, i64)>,
+    /// Optional marginal probability table from forward-backward algorithm
+    pub probs: Option<LatticeProbTable>,
 }
 
 impl DebugSession {
@@ -147,6 +151,57 @@ impl DebugSession {
             best_path,
             best_path_cost,
             alternative_paths: Vec::new(),
+            probs: None,
+        })
+    }
+
+    /// Create a new debug session with marginal probability computation via
+    /// the forward-backward algorithm.
+    ///
+    /// This runs an extra forward-backward pass over the lattice after the
+    /// standard Viterbi forward pass, populating `probs` with per-node
+    /// marginal probabilities P(node | input).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lattice construction or Viterbi algorithm fails.
+    pub fn new_with_probs(text: &str, dict: &Dictionary) -> Result<Self> {
+        // Build the lattice
+        let lattice = Lattice::build(text, dict)?;
+
+        // Convert lattice nodes to debug nodes
+        let nodes_at: Vec<Vec<DebugNode>> = lattice
+            .nodes_at
+            .iter()
+            .enumerate()
+            .map(|(pos, nodes)| {
+                nodes
+                    .iter()
+                    .enumerate()
+                    .map(|(idx, node)| DebugNode::from_lattice_node(node, pos, idx))
+                    .collect()
+            })
+            .collect();
+
+        // Run forward pass to compute costs
+        let (viterbi_entries, edges) = Self::forward_pass(&lattice, dict);
+
+        // Find best path
+        let (best_path, best_path_cost) = Self::find_best_path(&viterbi_entries, lattice.len());
+
+        // Run forward-backward to compute marginal probabilities
+        let solver = ViterbiSolver::new(dict);
+        let probs = solver.forward_backward(&lattice);
+
+        Ok(Self {
+            text: text.to_string(),
+            nodes_at,
+            viterbi_entries,
+            edges,
+            best_path,
+            best_path_cost,
+            alternative_paths: Vec::new(),
+            probs: Some(probs),
         })
     }
 
@@ -278,7 +333,7 @@ impl DebugSession {
         let mut best_eos: Option<&DebugViterbiEntry> = None;
         for idx in 0.. {
             if let Some(entry) = entries.get(&(eos_pos, idx)) {
-                if best_eos.is_none() || entry.cumulative_cost < best_eos.unwrap().cumulative_cost {
+                if best_eos.is_none_or(|e| entry.cumulative_cost < e.cumulative_cost) {
                     best_eos = Some(entry);
                 }
             } else {
@@ -346,6 +401,21 @@ impl DebugSession {
             .unwrap_or(0)
     }
 
+    /// Look up the marginal probability for a node at (pos, idx), if available.
+    ///
+    /// The `pos` index matches the `by_position` index in [`LatticeProbTable`],
+    /// and the node is matched by surface and byte range.  Returns `None` when
+    /// `probs` is not populated or no matching marginal is found.
+    pub fn get_node_prob(&self, pos: usize, idx: usize) -> Option<f64> {
+        let probs = self.probs.as_ref()?;
+        let node = self.get_node(pos, idx)?;
+        let marginals = probs.by_position.get(pos)?;
+        marginals
+            .iter()
+            .find(|m| m.start == node.start && m.end == node.end && m.surface == node.surface)
+            .map(|m| m.prob)
+    }
+
     /// Calculate cost delta from best alternative
     ///
     /// Returns how much more costly the best alternative is compared to the best path
@@ -358,8 +428,7 @@ impl DebugSession {
             for (alt_idx, _) in nodes.iter().enumerate() {
                 if alt_idx != idx {
                     if let Some(entry) = self.viterbi_entries.get(&(pos, alt_idx)) {
-                        if best_alt_cost.is_none() || entry.cumulative_cost < best_alt_cost.unwrap()
-                        {
+                        if best_alt_cost.is_none_or(|c| entry.cumulative_cost < c) {
                             best_alt_cost = Some(entry.cumulative_cost);
                         }
                     }

@@ -14,22 +14,23 @@
 ## Planned
 
 ### Data Sources
-- [ ] Wikipedia abstract integration
-- [ ] DBpedia support
-- [ ] Custom ontology import
+- [x] Wikipedia abstract integration
+- [x] DBpedia support
+- [x] Online entity resolution (Wikidata API fallback)
+- [x] Custom ontology import (CSV, JSON, RDF/OWL)
 
 ### Output Formats
-- [ ] Direct sys.dic generation
-- [ ] CSV with embedded URIs
+- [x] Direct sys.dic generation
+- [x] CSV with embedded URIs
 
 ### Performance
-- [ ] Parallel processing with rayon
-- [ ] Incremental index updates
-- [ ] Delta processing for updates
-- [ ] Memory-efficient streaming
+- [x] Parallel processing with rayon (chunked parallel JSON parse in build_wikidata_index)
+- [x] Incremental index updates
+- [x] Delta processing for updates
+- [x] Memory-efficient streaming
 
 ### Quality
-- [ ] Confidence calibration
-- [ ] Entity type filtering
-- [ ] POS-based URI filtering
-- [ ] Duplicate detection
+- [x] Confidence calibration (calibrated_confidence + recalibrate() ambiguity penalty)
+- [x] Entity type filtering (P31 claims, entity_type_filter in BuildConfig)
+- [x] POS-based URI filtering (pos_to_allowed_entity_types in merge_dictionary)
+- [x] Duplicate detection (max-confidence HashMap dedup in WikidataIndex)

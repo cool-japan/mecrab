@@ -10,6 +10,9 @@ Cargo.lock
 # IDE
 .idea/
 .vscode/
+
+# Claude AI config
+**/.claude/
 *.swp
 *.swo
 *~
@@ -33,3 +36,6 @@ tarpaulin-report.html
 # Temporary files
 *.tmp
 *.bak
+
+# Rustc ICE dumps
+rustc-ice-*.txt

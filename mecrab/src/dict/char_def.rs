@@ -17,6 +17,8 @@ use byteorder::{ByteOrder, LittleEndian};
 use memmap2::Mmap;
 use std::sync::Arc;
 
+use super::sys_dic::DataBacking;
+
 /// Character category names (matching IPADIC)
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 #[repr(u8)]
@@ -127,8 +129,8 @@ impl CharInfo {
 
 /// Character definition table
 pub struct CharDef {
-    /// Memory map (kept alive)
-    _mmap: Arc<Mmap>,
+    /// Backing store (kept alive so map_ptr remains valid)
+    _backing: DataBacking,
     /// Category names
     categories: Vec<String>,
     /// Pointer to CharInfo table (0xFFFF entries)
@@ -151,25 +153,16 @@ impl CharDef {
     /// Number of entries in the CharInfo table (0xFFFF = 65535)
     pub const TABLE_SIZE: usize = 0xFFFF;
 
-    /// Load character definitions from memory-mapped file
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the file is corrupted.
-    pub fn from_mmap(mmap: Arc<Mmap>) -> Result<Self> {
-        let data = &mmap[..];
-
+    /// Parse a byte slice and return `(categories, map_ptr)`.
+    fn parse_bytes(data: &[u8]) -> Result<(Vec<String>, *const CharInfo)> {
         if data.len() < 4 {
             return Err(Error::CharDefError(
                 "Character definition file too small".to_string(),
             ));
         }
 
-        // Read the number of categories
         let csize = LittleEndian::read_u32(&data[0..4]) as usize;
 
-        // Validate file size
-        // Expected: 4 + (csize * 32) + (0xFFFF * 4)
         let expected_size = 4 + (csize * 32) + (Self::TABLE_SIZE * CharInfo::SIZE);
         if data.len() != expected_size {
             return Err(Error::CharDefError(format!(
@@ -179,7 +172,6 @@ impl CharDef {
             )));
         }
 
-        // Read category names
         let mut categories = Vec::with_capacity(csize);
         let mut offset = 4;
         for _ in 0..csize {
@@ -193,11 +185,33 @@ impl CharDef {
             offset += 32;
         }
 
-        // Get pointer to CharInfo table
         let map_ptr = data[offset..].as_ptr() as *const CharInfo;
+        Ok((categories, map_ptr))
+    }
 
+    /// Load character definitions from memory-mapped file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file is corrupted.
+    pub fn from_mmap(mmap: Arc<Mmap>) -> Result<Self> {
+        let (categories, map_ptr) = Self::parse_bytes(mmap.as_ref())?;
         Ok(Self {
-            _mmap: mmap,
+            _backing: DataBacking::Mmap(mmap),
+            categories,
+            map_ptr,
+        })
+    }
+
+    /// Load character definitions from an owned byte buffer (no filesystem required).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data is corrupted.
+    pub fn from_bytes_owned(data: Arc<Vec<u8>>) -> Result<Self> {
+        let (categories, map_ptr) = Self::parse_bytes(data.as_ref())?;
+        Ok(Self {
+            _backing: DataBacking::Owned(data),
             categories,
             map_ptr,
         })
@@ -274,6 +288,129 @@ impl CharDef {
     }
 }
 
+/// Number of cache slots (power of 2 for fast modulo via bit-AND)
+const CHAR_CACHE_SLOTS: usize = 256;
+
+/// A single cache entry: code_point → CharInfo + valid flag
+#[derive(Clone, Copy)]
+struct CharCacheEntry {
+    code_point: u32,
+    info: CharInfo,
+    valid: bool,
+}
+
+impl Default for CharCacheEntry {
+    fn default() -> Self {
+        Self {
+            code_point: 0,
+            info: CharInfo::default(),
+            valid: false,
+        }
+    }
+}
+
+/// `CharDef` wrapper with a direct-mapped lookup cache.
+///
+/// Slot assignment: `code_point & (CHAR_CACHE_SLOTS - 1)`.
+/// Hit rate is very high for Japanese text because:
+///   - Hiragana spans U+3041..U+3096 (only 85 distinct chars)
+///   - Katakana spans U+30A0..U+30FF (96 chars)
+///   - Most sentences use a small vocabulary of character types
+///
+/// Interior mutability via `UnsafeCell` to allow cache writes through `&self`
+/// (single-threaded use within one Viterbi solve call).
+pub struct CharDefCached {
+    inner: CharDef,
+    cache: std::cell::UnsafeCell<[CharCacheEntry; CHAR_CACHE_SLOTS]>,
+}
+
+// Safety: single-threaded use in Viterbi solver; see CachedMatrix for same pattern
+unsafe impl Send for CharDefCached {}
+unsafe impl Sync for CharDefCached {}
+
+impl CharDefCached {
+    /// Wrap a `CharDef` with a direct-mapped lookup cache.
+    pub fn new(inner: CharDef) -> Self {
+        Self {
+            inner,
+            cache: std::cell::UnsafeCell::new([CharCacheEntry::default(); CHAR_CACHE_SLOTS]),
+        }
+    }
+
+    /// Get `CharInfo` with caching.
+    ///
+    /// On a cache hit (same `code_point` in the slot), returns the cached value.
+    /// On a miss, delegates to the inner `CharDef` and stores the result.
+    #[inline]
+    pub fn get_char_info(&self, c: char) -> CharInfo {
+        let code = c as u32;
+        let slot = (code as usize) & (CHAR_CACHE_SLOTS - 1);
+
+        // Safety: single-threaded access guaranteed by design (see struct docs).
+        // The Viterbi solver creates its own instance per solve call and does not
+        // share it across threads without external synchronisation.
+        let cache = unsafe { &mut *self.cache.get() };
+        let entry = &mut cache[slot];
+
+        if entry.valid && entry.code_point == code {
+            return entry.info;
+        }
+
+        let info = self.inner.get_char_info(c);
+        *entry = CharCacheEntry {
+            code_point: code,
+            info,
+            valid: true,
+        };
+        info
+    }
+
+    /// Get `CharInfo` from a UTF-8 byte slice with caching.
+    ///
+    /// Returns `(CharInfo, consumed_bytes)`.
+    pub fn get_char_info_from_bytes(&self, bytes: &[u8]) -> (CharInfo, usize) {
+        if bytes.is_empty() {
+            return (CharInfo::default(), 0);
+        }
+        match std::str::from_utf8(bytes) {
+            Ok(s) => {
+                if let Some(c) = s.chars().next() {
+                    let len = c.len_utf8();
+                    (self.get_char_info(c), len)
+                } else {
+                    (CharInfo::default(), 0)
+                }
+            }
+            Err(_) => (CharInfo::default(), 1),
+        }
+    }
+
+    /// Access the inner `CharDef`.
+    pub fn inner(&self) -> &CharDef {
+        &self.inner
+    }
+
+    /// Invalidate the entire cache.
+    ///
+    /// Useful after a hot-swap of dictionary data so that stale entries are
+    /// not returned.
+    pub fn invalidate_cache(&self) {
+        // Safety: single-threaded invalidation; same safety invariant as get_char_info.
+        let cache = unsafe { &mut *self.cache.get() };
+        for entry in cache.iter_mut() {
+            entry.valid = false;
+        }
+    }
+}
+
+impl std::fmt::Debug for CharDefCached {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("CharDefCached")
+            .field("inner", &self.inner)
+            .finish_non_exhaustive()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -301,5 +438,32 @@ mod tests {
         assert_eq!(CharCategory::from(6), CharCategory::Hiragana);
         assert_eq!(CharCategory::from(7), CharCategory::Katakana);
         assert_eq!(CharCategory::from(255), CharCategory::Default);
+    }
+
+    #[test]
+    fn test_char_cache_slot_bounds() {
+        // Verify slot assignment stays within bounds for representative Japanese ranges
+        let slot_hiragana = ('あ' as u32) as usize & (CHAR_CACHE_SLOTS - 1);
+        let slot_katakana = ('ア' as u32) as usize & (CHAR_CACHE_SLOTS - 1);
+        let slot_kanji = ('漢' as u32) as usize & (CHAR_CACHE_SLOTS - 1);
+        let slot_ascii = ('A' as u32) as usize & (CHAR_CACHE_SLOTS - 1);
+
+        assert!(slot_hiragana < CHAR_CACHE_SLOTS);
+        assert!(slot_katakana < CHAR_CACHE_SLOTS);
+        assert!(slot_kanji < CHAR_CACHE_SLOTS);
+        assert!(slot_ascii < CHAR_CACHE_SLOTS);
+    }
+
+    #[test]
+    fn test_char_cache_entry_default() {
+        let entry = CharCacheEntry::default();
+        assert!(!entry.valid);
+        assert_eq!(entry.code_point, 0);
+    }
+
+    #[test]
+    fn test_char_cache_slots_power_of_two() {
+        // CHAR_CACHE_SLOTS must be a power of two for the AND-mask trick
+        assert_eq!(CHAR_CACHE_SLOTS & (CHAR_CACHE_SLOTS - 1), 0);
     }
 }

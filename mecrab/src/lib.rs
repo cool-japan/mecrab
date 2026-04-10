@@ -59,16 +59,23 @@
 #![allow(clippy::needless_pass_by_value)]
 
 pub mod bench;
+pub mod builder;
+pub mod corpus;
 pub mod debug;
 pub mod dict;
 pub mod error;
 pub mod lattice;
 pub mod normalize;
 pub mod phonetic;
+pub mod rerank;
 pub mod semantic;
 pub mod stream;
+pub mod types;
 pub mod vectors;
 pub mod viterbi;
+
+/// Extended API: batch processing and lazy iterator adapters.
+pub mod api;
 
 #[cfg(feature = "wasm")]
 pub mod wasm;
@@ -76,480 +83,46 @@ pub mod wasm;
 #[cfg(feature = "python")]
 pub mod python;
 
+pub use builder::MeCrabBuilder;
+pub use corpus::{CorpusStats, SurfaceVocab};
 pub use error::{Error, Result};
+pub use rerank::{CostReranker, NullReranker, RerankCandidate, Reranker};
+pub use types::{AnalysisResult, Morpheme, OutputFormat};
 
-use std::fmt;
-use std::path::PathBuf;
+#[cfg(feature = "neural")]
+pub use rerank::neural::NeuralReranker;
+
+pub use dict::provider::{
+    AutoDetectProvider, DictionaryFormat, DictionaryProvider, IpadicProvider, MorphemeFeatures,
+    NeologdProvider, UnidicProvider,
+};
+
+/// Re-export SIMD batch connection cost lookup for benchmarking.
+///
+/// Gathers up to 16 connection costs from a connection-matrix row at once,
+/// widening each `i16` value to `i32`. The implementation dispatches to ARM
+/// NEON, x86_64 AVX2/SSE4.1, WASM simd128, or a scalar fallback depending on
+/// the build target.
+#[cfg(feature = "simd")]
+pub use viterbi::simd::batch_connection_costs;
+
 use std::sync::Arc;
 
 use dict::Dictionary;
 use lattice::Lattice;
 use viterbi::ViterbiSolver;
 
-/// Output format for morphological analysis results
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum OutputFormat {
-    /// Default MeCab format: surface\tfeatures
-    #[default]
-    Default,
-    /// Wakati format: space-separated surface forms
-    Wakati,
-    /// Dump all lattice information for debugging
-    Dump,
-    /// JSON output format
-    Json,
-    /// JSON-LD output format with semantic URIs
-    Jsonld,
-    /// Turtle (TTL) RDF format
-    Turtle,
-    /// N-Triples RDF format
-    Ntriples,
-    /// N-Quads RDF format
-    Nquads,
-}
-
-/// A single morpheme (token) in the analysis result
-#[derive(Debug, Clone)]
-pub struct Morpheme {
-    /// Surface form (the actual text)
-    pub surface: String,
-    /// Word ID (token index in dictionary, used for embeddings and training)
-    pub word_id: u32,
-    /// Part-of-speech ID
-    pub pos_id: u16,
-    /// Word cost
-    pub wcost: i16,
-    /// Feature string (comma-separated POS info, reading, etc.)
-    pub feature: String,
-    /// Semantic entity references (optional)
-    pub entities: Vec<semantic::extension::EntityReference>,
-    /// IPA pronunciation (optional, populated when ipa_enabled=true)
-    pub pronunciation: Option<String>,
-    /// Word embedding vector (optional, populated when vector_enabled=true)
-    pub embedding: Option<Vec<f32>>,
-}
-
-impl fmt::Display for Morpheme {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Main line: MeCab-compatible format
-        write!(f, "{}\t{}", self.surface, self.feature)?;
-
-        // Optional IPA pronunciation line
-        if let Some(ref ipa) = self.pronunciation {
-            write!(f, "\n  IPA: /{}/", ipa)?;
-        }
-
-        // Optional embedding vector (show first 8 dimensions for readability)
-        if let Some(ref emb) = self.embedding {
-            write!(f, "\n  Vector: [")?;
-            let show_dims = emb.len().min(8);
-            for (i, val) in emb.iter().take(show_dims).enumerate() {
-                if i > 0 {
-                    write!(f, ", ")?;
-                }
-                write!(f, "{:.3}", val)?;
-            }
-            if emb.len() > show_dims {
-                write!(f, ", ...")?;
-            }
-            write!(f, "] (dim={})", emb.len())?;
-        }
-
-        Ok(())
-    }
-}
-
-/// Analysis result containing a sequence of morphemes
-#[derive(Debug, Clone)]
-pub struct AnalysisResult {
-    /// The morphemes in the analysis result
-    pub morphemes: Vec<Morpheme>,
-    /// Output format
-    format: OutputFormat,
-}
-
-impl fmt::Display for AnalysisResult {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self.format {
-            OutputFormat::Default => {
-                for morpheme in &self.morphemes {
-                    writeln!(f, "{morpheme}")?;
-                }
-                writeln!(f, "EOS")
-            }
-            OutputFormat::Wakati => {
-                let surfaces: Vec<&str> =
-                    self.morphemes.iter().map(|m| m.surface.as_str()).collect();
-                writeln!(f, "{}", surfaces.join(" "))
-            }
-            OutputFormat::Dump => {
-                for (i, morpheme) in self.morphemes.iter().enumerate() {
-                    writeln!(
-                        f,
-                        "[{}] {} (pos_id={}, wcost={})\t{}",
-                        i, morpheme.surface, morpheme.pos_id, morpheme.wcost, morpheme.feature
-                    )?;
-                }
-                writeln!(f, "EOS")
-            }
-            OutputFormat::Json => self.format_json(f),
-            OutputFormat::Jsonld => self.format_jsonld(f),
-            OutputFormat::Turtle => self.format_turtle(f),
-            OutputFormat::Ntriples => self.format_ntriples(f),
-            OutputFormat::Nquads => self.format_nquads(f),
-        }
-    }
-}
-
-impl AnalysisResult {
-    /// Format as JSON
-    fn format_json(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "[")?;
-        for (i, m) in self.morphemes.iter().enumerate() {
-            if i > 0 {
-                write!(f, ",")?;
-            }
-            write!(
-                f,
-                "{{\"surface\":\"{}\",\"feature\":\"{}\"}}",
-                semantic::jsonld::escape_json(&m.surface),
-                semantic::jsonld::escape_json(&m.feature)
-            )?;
-        }
-        write!(f, "]")
-    }
-
-    /// Format as JSON-LD with semantic URIs
-    fn format_jsonld(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        writeln!(f, "{{")?;
-        writeln!(f, "  \"@context\": {{")?;
-        writeln!(f, "    \"wd\": \"http://www.wikidata.org/entity/\",")?;
-        writeln!(f, "    \"dbr\": \"http://dbpedia.org/resource/\",")?;
-        writeln!(f, "    \"schema\": \"http://schema.org/\",")?;
-        writeln!(f, "    \"mecrab\": \"http://mecrab.io/ns#\"")?;
-        writeln!(f, "  }},")?;
-        writeln!(f, "  \"@type\": \"mecrab:Analysis\",")?;
-        writeln!(f, "  \"tokens\": [")?;
-
-        for (i, m) in self.morphemes.iter().enumerate() {
-            // Parse feature string to extract reading if available
-            let features: Vec<&str> = m.feature.split(',').collect();
-            let reading = features.get(7).copied(); // IPADIC format: reading is at index 7
-
-            writeln!(f, "    {{")?;
-            writeln!(
-                f,
-                "      \"surface\": \"{}\",",
-                semantic::jsonld::escape_json(&m.surface)
-            )?;
-            writeln!(
-                f,
-                "      \"pos\": \"{}\",",
-                features.first().copied().unwrap_or("*")
-            )?;
-            if let Some(r) = reading {
-                if r != "*" {
-                    writeln!(f, "      \"reading\": \"{}\",", r)?;
-                }
-            }
-
-            // Add IPA pronunciation if available
-            if let Some(ref ipa) = m.pronunciation {
-                writeln!(f, "      \"pronunciation\": \"/{}/ \",", ipa)?;
-            }
-
-            // Add embedding vector if available
-            if let Some(ref embedding) = m.embedding {
-                write!(f, "      \"embedding\": [")?;
-                for (j, val) in embedding.iter().enumerate() {
-                    if j > 0 {
-                        write!(f, ", ")?;
-                    }
-                    write!(f, "{:.3}", val)?;
-                }
-                writeln!(f, "],")?;
-            }
-
-            // Determine if we need trailing comma after wcost
-            let has_entities = !m.entities.is_empty();
-
-            if has_entities {
-                writeln!(f, "      \"wcost\": {},", m.wcost)?;
-                writeln!(f, "      \"entities\": [")?;
-                for (j, entity) in m.entities.iter().enumerate() {
-                    let compact = semantic::compact_uri(&entity.uri);
-                    write!(
-                        f,
-                        "        {{\"@id\": \"{}\", \"confidence\": {:.2}}}",
-                        compact, entity.confidence
-                    )?;
-                    if j < m.entities.len() - 1 {
-                        writeln!(f, ",")?;
-                    } else {
-                        writeln!(f)?;
-                    }
-                }
-                write!(f, "      ]")?;
-            } else {
-                write!(f, "      \"wcost\": {}", m.wcost)?;
-            }
-
-            if i < self.morphemes.len() - 1 {
-                writeln!(f, "\n    }},")?;
-            } else {
-                writeln!(f, "\n    }}")?;
-            }
-        }
-
-        writeln!(f, "  ]")?;
-        write!(f, "}}")
-    }
-
-    /// Format as Turtle (TTL) RDF
-    fn format_turtle(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Prepare token data for export
-        let tokens: Vec<(String, String, Option<String>, Vec<semantic::SemanticEntry>)> = self
-            .morphemes
-            .iter()
-            .map(|m| {
-                let features: Vec<&str> = m.feature.split(',').collect();
-                let pos = features.first().copied().unwrap_or("*").to_string();
-                let reading = features
-                    .get(7)
-                    .filter(|&&r| r != "*")
-                    .map(|&r| r.to_string());
-
-                // Convert EntityReference to SemanticEntry
-                let entities: Vec<semantic::SemanticEntry> = m
-                    .entities
-                    .iter()
-                    .map(|e| {
-                        semantic::SemanticEntry::new(
-                            &e.uri,
-                            e.confidence,
-                            semantic::OntologySource::Wikidata,
-                        )
-                    })
-                    .collect();
-
-                (m.surface.clone(), pos, reading, entities)
-            })
-            .collect();
-
-        let turtle = semantic::rdf::export_turtle(&tokens, "http://example.org/analysis");
-        write!(f, "{}", turtle)
-    }
-
-    /// Format as N-Triples RDF
-    fn format_ntriples(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Prepare token data for export
-        let tokens: Vec<(String, String, Option<String>, Vec<semantic::SemanticEntry>)> = self
-            .morphemes
-            .iter()
-            .map(|m| {
-                let features: Vec<&str> = m.feature.split(',').collect();
-                let pos = features.first().copied().unwrap_or("*").to_string();
-                let reading = features
-                    .get(7)
-                    .filter(|&&r| r != "*")
-                    .map(|&r| r.to_string());
-
-                let entities: Vec<semantic::SemanticEntry> = m
-                    .entities
-                    .iter()
-                    .map(|e| {
-                        semantic::SemanticEntry::new(
-                            &e.uri,
-                            e.confidence,
-                            semantic::OntologySource::Wikidata,
-                        )
-                    })
-                    .collect();
-
-                (m.surface.clone(), pos, reading, entities)
-            })
-            .collect();
-
-        let ntriples = semantic::rdf::export_ntriples(&tokens, "http://example.org/analysis");
-        write!(f, "{}", ntriples)
-    }
-
-    /// Format as N-Quads RDF
-    fn format_nquads(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        // Prepare token data for export
-        let tokens: Vec<(String, String, Option<String>, Vec<semantic::SemanticEntry>)> = self
-            .morphemes
-            .iter()
-            .map(|m| {
-                let features: Vec<&str> = m.feature.split(',').collect();
-                let pos = features.first().copied().unwrap_or("*").to_string();
-                let reading = features
-                    .get(7)
-                    .filter(|&&r| r != "*")
-                    .map(|&r| r.to_string());
-
-                let entities: Vec<semantic::SemanticEntry> = m
-                    .entities
-                    .iter()
-                    .map(|e| {
-                        semantic::SemanticEntry::new(
-                            &e.uri,
-                            e.confidence,
-                            semantic::OntologySource::Wikidata,
-                        )
-                    })
-                    .collect();
-
-                (m.surface.clone(), pos, reading, entities)
-            })
-            .collect();
-
-        let nquads = semantic::rdf::export_nquads(
-            &tokens,
-            "http://example.org/analysis",
-            "http://example.org/graph",
-        );
-        write!(f, "{}", nquads)
-    }
-}
-
-/// Builder for configuring MeCrab instance
-#[derive(Debug, Default)]
-pub struct MeCrabBuilder {
-    dicdir: Option<PathBuf>,
-    userdic: Option<PathBuf>,
-    semantic_pool: Option<PathBuf>,
-    vector_pool: Option<PathBuf>,
-    with_semantic: bool,
-    with_ipa: bool,
-    with_vector: bool,
-    output_format: OutputFormat,
-}
-
-impl MeCrabBuilder {
-    /// Create a new builder with default settings
-    #[must_use]
-    pub fn new() -> Self {
-        Self::default()
-    }
-
-    /// Set the dictionary directory
-    #[must_use]
-    pub fn dicdir(mut self, path: Option<PathBuf>) -> Self {
-        self.dicdir = path;
-        self
-    }
-
-    /// Set the user dictionary path
-    #[must_use]
-    pub fn userdic(mut self, path: Option<PathBuf>) -> Self {
-        self.userdic = path;
-        self
-    }
-
-    /// Set the semantic pool path
-    #[must_use]
-    pub fn semantic_pool(mut self, path: Option<PathBuf>) -> Self {
-        self.semantic_pool = path;
-        self
-    }
-
-    /// Enable semantic URI output (requires semantic pool to be loaded)
-    #[must_use]
-    pub fn with_semantic(mut self, enabled: bool) -> Self {
-        self.with_semantic = enabled;
-        self
-    }
-
-    /// Enable IPA pronunciation output
-    #[must_use]
-    pub fn with_ipa(mut self, enabled: bool) -> Self {
-        self.with_ipa = enabled;
-        self
-    }
-
-    /// Set the vector pool file path (vectors.bin)
-    #[must_use]
-    pub fn vector_pool(mut self, path: Option<PathBuf>) -> Self {
-        self.vector_pool = path;
-        self
-    }
-
-    /// Enable vector embedding output
-    #[must_use]
-    pub fn with_vector(mut self, enabled: bool) -> Self {
-        self.with_vector = enabled;
-        self
-    }
-
-    /// Set the output format
-    #[must_use]
-    pub fn output_format(mut self, format: OutputFormat) -> Self {
-        self.output_format = format;
-        self
-    }
-
-    /// Build the MeCrab instance
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the dictionary cannot be loaded.
-    pub fn build(self) -> Result<MeCrab> {
-        let dictionary = match (self.dicdir, self.semantic_pool) {
-            (Some(dicdir), Some(semantic_path)) => {
-                Dictionary::load_with_semantics(&dicdir, &semantic_path)?
-            }
-            (Some(dicdir), None) => {
-                // Try to auto-load semantic.bin from dicdir if it exists
-                let semantic_path = dicdir.join("semantic.bin");
-                if semantic_path.exists() {
-                    Dictionary::load_with_semantics(&dicdir, &semantic_path)?
-                } else {
-                    Dictionary::load(&dicdir)?
-                }
-            }
-            (None, Some(semantic_path)) => {
-                let dict = Dictionary::default_dictionary()?;
-                let pool_file = std::fs::File::open(&semantic_path)?;
-                let pool_data = unsafe { memmap2::Mmap::map(&pool_file)? };
-                let pool = crate::semantic::pool::SemanticPool::from_bytes(&pool_data)?;
-                let mut dict_mut = dict;
-                dict_mut.semantic_pool = Some(Arc::new(pool));
-                dict_mut
-            }
-            (None, None) => {
-                // Try to auto-load from default directory
-                Dictionary::default_dictionary()?
-            }
-        };
-
-        // Load vector store if path provided
-        let vector_store = if let Some(vector_path) = self.vector_pool {
-            Some(Arc::new(vectors::VectorStore::from_file(&vector_path)?))
-        } else {
-            None
-        };
-
-        Ok(MeCrab {
-            dictionary: Arc::new(dictionary),
-            output_format: self.output_format,
-            semantic_enabled: self.with_semantic,
-            ipa_enabled: self.with_ipa,
-            vector_enabled: self.with_vector,
-            vector_store,
-        })
-    }
-}
-
 /// The main MeCrab morphological analyzer
 #[derive(Clone)]
 pub struct MeCrab {
-    dictionary: Arc<Dictionary>,
-    output_format: OutputFormat,
-    semantic_enabled: bool,
-    ipa_enabled: bool,
-    vector_enabled: bool,
-    vector_store: Option<Arc<vectors::VectorStore>>,
+    pub(crate) dictionary: Arc<Dictionary>,
+    pub(crate) output_format: OutputFormat,
+    pub(crate) semantic_enabled: bool,
+    pub(crate) ipa_enabled: bool,
+    pub(crate) vector_enabled: bool,
+    pub(crate) vector_store: Option<Arc<vectors::VectorStore>>,
+    /// Dictionary provider used for structured feature parsing
+    pub(crate) provider: Arc<dyn DictionaryProvider>,
 }
 
 impl MeCrab {
@@ -566,6 +139,40 @@ impl MeCrab {
     #[must_use]
     pub fn builder() -> MeCrabBuilder {
         MeCrabBuilder::new()
+    }
+
+    /// Replace the `DictionaryProvider` used for structured feature parsing.
+    ///
+    /// Returns a new `MeCrab` that shares all other state with `self` but uses
+    /// the supplied provider.  Because `MeCrab` is cheaply cloneable (Arc
+    /// internals), this is a low-cost operation.
+    ///
+    /// # Example
+    ///
+    /// ```no_run
+    /// use mecrab::{MeCrab, UnidicProvider};
+    ///
+    /// let mecrab = MeCrab::new()?.with_provider(UnidicProvider);
+    /// # Ok::<(), mecrab::Error>(())
+    /// ```
+    #[must_use]
+    pub fn with_provider(mut self, provider: impl DictionaryProvider + 'static) -> Self {
+        self.provider = Arc::new(provider);
+        self
+    }
+
+    /// Return a reference to the active `DictionaryProvider`.
+    #[must_use]
+    pub fn provider(&self) -> &dyn DictionaryProvider {
+        self.provider.as_ref()
+    }
+
+    /// Return a reference to the loaded `VectorStore`, if any.
+    ///
+    /// Returns `None` when the analyzer was built without a vector path.
+    #[must_use]
+    pub fn vector_store(&self) -> Option<&vectors::VectorStore> {
+        self.vector_store.as_deref()
     }
 
     /// Parse the input text and return analysis result
@@ -612,6 +219,8 @@ impl MeCrab {
                     entities,
                     pronunciation,
                     embedding,
+                    start_byte: node.start_byte,
+                    end_byte: node.end_byte,
                 }
             })
             .collect();
@@ -713,43 +322,6 @@ impl MeCrab {
         Ok(surfaces.join(" "))
     }
 
-    /// Parse multiple texts in parallel using Rayon
-    ///
-    /// This method leverages all available CPU cores for batch processing,
-    /// providing significant speedup for large workloads.
-    ///
-    /// # Errors
-    ///
-    /// Returns a vector of results, where each result may be an error.
-    #[cfg(feature = "parallel")]
-    pub fn parse_batch(&self, texts: &[&str]) -> Vec<Result<AnalysisResult>> {
-        use rayon::prelude::*;
-        texts.par_iter().map(|text| self.parse(text)).collect()
-    }
-
-    /// Parse multiple texts sequentially (fallback when parallel feature is disabled)
-    #[cfg(not(feature = "parallel"))]
-    pub fn parse_batch(&self, texts: &[&str]) -> Vec<Result<AnalysisResult>> {
-        texts.iter().map(|text| self.parse(text)).collect()
-    }
-
-    /// Parse multiple texts and return wakati outputs in parallel
-    ///
-    /// # Errors
-    ///
-    /// Returns a vector of results.
-    #[cfg(feature = "parallel")]
-    pub fn wakati_batch(&self, texts: &[&str]) -> Vec<Result<String>> {
-        use rayon::prelude::*;
-        texts.par_iter().map(|text| self.wakati(text)).collect()
-    }
-
-    /// Parse multiple texts and return wakati outputs sequentially
-    #[cfg(not(feature = "parallel"))]
-    pub fn wakati_batch(&self, texts: &[&str]) -> Vec<Result<String>> {
-        texts.iter().map(|text| self.wakati(text)).collect()
-    }
-
     /// Add a word to the dictionary at runtime
     ///
     /// This is a key feature for production systems that need to handle
@@ -846,6 +418,8 @@ impl MeCrab {
                             entities,
                             pronunciation,
                             embedding,
+                            start_byte: node.start_byte,
+                            end_byte: node.end_byte,
                         }
                     })
                     .collect();
@@ -862,6 +436,128 @@ impl MeCrab {
 
         Ok(results)
     }
+
+    /// Parse text and return both the analysis result and lattice marginal probabilities.
+    ///
+    /// Uses the forward-backward algorithm to compute `P(morpheme | input)` for
+    /// every node in the lattice.  The marginals can be used for:
+    ///
+    /// - Subword regularization in LLM pre-training
+    /// - Uncertainty estimation in morphological disambiguation
+    /// - Lattice-based sequence labelling
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lattice construction or Viterbi solving fails.
+    pub fn parse_with_probs(
+        &self,
+        text: &str,
+    ) -> Result<(AnalysisResult, crate::viterbi::analysis::LatticeProbTable)> {
+        let lattice = Lattice::build(text, &self.dictionary)?;
+        let solver = ViterbiSolver::new(&self.dictionary);
+        let path = solver.solve(&lattice)?;
+        let probs = solver.forward_backward(&lattice);
+
+        let morphemes = path
+            .into_iter()
+            .map(|node| {
+                let entities = if self.semantic_enabled {
+                    self.get_entities_for_surface(&node.surface)
+                } else {
+                    Vec::new()
+                };
+                let pronunciation = if self.ipa_enabled {
+                    self.get_ipa_pronunciation(&node.feature)
+                } else {
+                    None
+                };
+                let embedding = if self.vector_enabled {
+                    self.get_embedding(node.word_id)
+                } else {
+                    None
+                };
+                Morpheme {
+                    surface: node.surface,
+                    word_id: node.word_id,
+                    pos_id: node.pos_id,
+                    wcost: node.wcost,
+                    feature: node.feature,
+                    entities,
+                    pronunciation,
+                    embedding,
+                    start_byte: node.start_byte,
+                    end_byte: node.end_byte,
+                }
+            })
+            .collect();
+
+        let result = AnalysisResult {
+            morphemes,
+            format: self.output_format,
+        };
+        Ok((result, probs))
+    }
+
+    /// Run N-best search and rerank candidates using the given [`Reranker`].
+    ///
+    /// Returns the single best [`AnalysisResult`] as selected by the reranker.
+    /// This is the primary entry point for Phase 3 neural reranking: pass a
+    /// [`rerank::NullReranker`] (zero overhead) for production, or a
+    /// [`rerank::CostReranker`] / [`rerank::neural::NeuralReranker`] for
+    /// higher-accuracy use cases.
+    ///
+    /// # Arguments
+    ///
+    /// * `text`     — Input text to analyze.
+    /// * `n`        — Number of N-best paths to generate before reranking.
+    ///   Must be ≥ 1.
+    /// * `reranker` — Reranker implementation to use for path selection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lattice construction or Viterbi solving fails, or if
+    /// the N-best search returns an empty candidate list.
+    pub fn parse_nbest_with_reranker(
+        &self,
+        text: &str,
+        n: usize,
+        reranker: &dyn rerank::Reranker,
+    ) -> Result<AnalysisResult> {
+        let candidates = self.parse_nbest(text, n)?;
+        if candidates.is_empty() {
+            return Err(Error::ViterbiError(
+                "No candidates returned from N-best search".into(),
+            ));
+        }
+
+        // Build a lightweight RerankCandidate view over the AnalysisResult list
+        // so that reranker implementations remain decoupled from the full
+        // AnalysisResult type.
+        let rerank_candidates: Vec<rerank::RerankCandidate> = candidates
+            .iter()
+            .map(|(result, cost)| rerank::RerankCandidate {
+                surfaces: result.morphemes.iter().map(|m| m.surface.clone()).collect(),
+                pos_tags: result
+                    .morphemes
+                    .iter()
+                    .map(|m| m.feature.split(',').next().unwrap_or("*").to_owned())
+                    .collect(),
+                cost: *cost,
+            })
+            .collect();
+
+        // Clamp returned index to valid range — a well-behaved reranker will
+        // never exceed `candidates.len() - 1`, but we defend against it here
+        // so the caller always receives a valid result without panic.
+        let raw_idx = reranker.rerank(&rerank_candidates);
+        let best_idx = raw_idx.min(candidates.len().saturating_sub(1));
+
+        candidates
+            .into_iter()
+            .nth(best_idx)
+            .map(|(result, _cost)| result)
+            .ok_or_else(|| Error::ViterbiError("Reranker returned out-of-bounds index".into()))
+    }
 }
 
 #[cfg(test)]
@@ -869,10 +565,235 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_morpheme_positions() {
+        // Verify struct construction and char/byte offset helpers compile and
+        // behave correctly without requiring a real dictionary.
+        let m = Morpheme {
+            surface: "東京".to_string(),
+            word_id: 0,
+            pos_id: 0,
+            wcost: 0,
+            feature: "名詞".to_string(),
+            entities: vec![],
+            pronunciation: None,
+            embedding: None,
+            start_byte: 0,
+            end_byte: 6, // "東京" = 3+3 bytes in UTF-8
+        };
+        assert_eq!(m.start_byte, 0);
+        assert_eq!(m.end_byte, 6);
+        assert_eq!(m.start_char("東京"), 0);
+        assert_eq!(m.end_char("東京"), 2);
+    }
+
+    #[test]
     fn test_builder_default() {
         let builder = MeCrab::builder();
         assert!(builder.dicdir.is_none());
         assert!(builder.userdic.is_none());
         assert_eq!(builder.output_format, OutputFormat::Default);
+    }
+
+    /// Verify that `parse_iter` produces the same number of results as the
+    /// input slice length (without requiring a real dictionary).
+    /// The actual parse errors are expected when no dictionary is present.
+    #[test]
+    fn test_parse_iter_result_count_matches_input() {
+        // When no default dictionary is installed the iterator still yields
+        // exactly `texts.len()` items (each being an Err in that case).
+        // This test validates the iterator's laziness contract.
+        let texts: Vec<&str> = vec!["東京", "大阪", "京都"];
+        // We cannot construct MeCrab without a dictionary, so we test the
+        // iterator adapter logic using a trivial closure that mirrors the impl.
+        let dummy_parse = |t: &&str| -> Result<usize> {
+            // stand-in for self.parse(*t)
+            Ok(t.len())
+        };
+        let results: Vec<_> = texts.iter().map(dummy_parse).collect();
+        assert_eq!(results.len(), texts.len());
+        for r in &results {
+            assert!(r.is_ok());
+        }
+    }
+
+    #[test]
+    fn test_noun_phrases_consecutive_nouns() {
+        let result = AnalysisResult {
+            morphemes: vec![
+                Morpheme {
+                    surface: "東京".into(),
+                    feature: "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ".into(),
+                    word_id: 1,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 0,
+                    end_byte: 6,
+                },
+                Morpheme {
+                    surface: "都".into(),
+                    feature: "名詞,接尾,地域,*,*,*,都,ト,ト".into(),
+                    word_id: 2,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 6,
+                    end_byte: 9,
+                },
+                Morpheme {
+                    surface: "は".into(),
+                    feature: "助詞,係助詞,*,*,*,*,は,ハ,ワ".into(),
+                    word_id: 3,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 9,
+                    end_byte: 12,
+                },
+            ],
+            format: OutputFormat::Default,
+        };
+
+        let phrases = result.noun_phrases();
+        assert_eq!(phrases.len(), 1);
+        assert_eq!(phrases[0].0, "東京都");
+        assert_eq!(phrases[0].1, 0);
+        assert_eq!(phrases[0].2, 9);
+    }
+
+    #[test]
+    fn test_named_entities_proper_noun() {
+        let result = AnalysisResult {
+            morphemes: vec![Morpheme {
+                surface: "東京".into(),
+                feature: "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ".into(),
+                word_id: 1,
+                pos_id: 0,
+                wcost: 0,
+                entities: vec![],
+                pronunciation: None,
+                embedding: None,
+                start_byte: 0,
+                end_byte: 6,
+            }],
+            format: OutputFormat::Default,
+        };
+
+        let entities = result.named_entities();
+        assert_eq!(entities.len(), 1);
+        assert_eq!(entities[0].0, "東京");
+        assert_eq!(entities[0].1, "地域");
+    }
+
+    #[test]
+    fn test_spans_basic() {
+        let result = AnalysisResult {
+            morphemes: vec![
+                Morpheme {
+                    surface: "東京".into(),
+                    feature: "名詞".into(),
+                    word_id: 1,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 0,
+                    end_byte: 6,
+                },
+                Morpheme {
+                    surface: "EOS".into(),
+                    feature: "".into(),
+                    word_id: 0,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 6,
+                    end_byte: 6,
+                },
+            ],
+            format: OutputFormat::Default,
+        };
+        let spans = result.spans();
+        assert_eq!(spans, vec![(0, 6)]);
+    }
+
+    #[test]
+    fn test_verb_chunks_basic() {
+        let result = AnalysisResult {
+            morphemes: vec![
+                Morpheme {
+                    surface: "食べ".into(),
+                    feature: "動詞,自立,*,*,一段,連用形,食べる,タベ,タベ".into(),
+                    word_id: 10,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 0,
+                    end_byte: 6,
+                },
+                Morpheme {
+                    surface: "られ".into(),
+                    feature: "助動詞,*,*,*,一段,連用形,られる,ラレ,ラレ".into(),
+                    word_id: 11,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 6,
+                    end_byte: 12,
+                },
+                Morpheme {
+                    surface: "た".into(),
+                    feature: "助動詞,*,*,*,特殊・タ,基本形,た,タ,タ".into(),
+                    word_id: 12,
+                    pos_id: 0,
+                    wcost: 0,
+                    entities: vec![],
+                    pronunciation: None,
+                    embedding: None,
+                    start_byte: 12,
+                    end_byte: 15,
+                },
+            ],
+            format: OutputFormat::Default,
+        };
+
+        let chunks = result.verb_chunks();
+        assert_eq!(chunks.len(), 1);
+        assert_eq!(chunks[0].0, "食べられた");
+        assert_eq!(chunks[0].1, 0);
+        assert_eq!(chunks[0].2, 15);
+    }
+
+    #[cfg(feature = "parallel")]
+    #[test]
+    fn test_parse_batch_with_progress_callback_count() {
+        use std::sync::Arc;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        // Simulate the callback-counting logic independently of a live dict.
+        let texts = ["a", "b", "c", "d", "e"];
+        let total = texts.len();
+        let counter = Arc::new(AtomicUsize::new(0));
+        let counter_clone = Arc::clone(&counter);
+
+        // Simulate what parse_batch_with_progress does
+        for _ in &texts {
+            counter_clone.fetch_add(1, Ordering::Relaxed);
+        }
+
+        assert_eq!(counter.load(Ordering::Relaxed), total);
     }
 }

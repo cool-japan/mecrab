@@ -282,7 +282,7 @@ impl UserDictManager {
 
     /// Sort entries by cost (lowest first)
     pub fn sort_by_cost(&mut self) {
-        self.entries.sort_by(|a, b| a.cost.cmp(&b.cost));
+        self.entries.sort_by_key(|e| e.cost);
     }
 }
 

@@ -15,6 +15,32 @@ use std::sync::Arc;
 use super::DictionaryEntry;
 use super::double_array_trie::{DartsResult, DoubleArrayTrie};
 
+/// Backing store for dictionary data — either a memory-mapped file or an owned heap buffer.
+///
+/// Keeping this alive ensures the raw pointers stored on the parent struct remain valid.
+/// The inner `Arc` is intentionally "never read" — its role is solely to keep the
+/// memory-mapped / heap buffer alive for the duration of the parent struct.
+pub(super) enum DataBacking {
+    /// Memory-mapped file (zero-copy on disk)
+    #[allow(dead_code)]
+    Mmap(Arc<Mmap>),
+    /// Owned heap buffer (used in WASM / no-filesystem contexts)
+    #[allow(dead_code)]
+    Owned(Arc<Vec<u8>>),
+}
+
+impl DataBacking {
+    /// Borrow the underlying byte slice regardless of backing kind.
+    #[inline]
+    #[allow(dead_code)]
+    pub(super) fn as_bytes(&self) -> &[u8] {
+        match self {
+            Self::Mmap(m) => m.as_ref(),
+            Self::Owned(v) => v.as_ref(),
+        }
+    }
+}
+
 /// Magic number for system dictionary validation
 /// From MeCab: const unsigned int DictionaryMagicID = 0xef718f77u;
 pub const DICTIONARY_MAGIC_ID: u32 = 0xef71_8f77;
@@ -54,8 +80,8 @@ impl Token {
 
 /// System dictionary containing trie, tokens, and features
 pub struct SysDic {
-    /// Memory map (kept alive)
-    _mmap: Arc<Mmap>,
+    /// Backing store (kept alive so raw pointers below remain valid)
+    _backing: DataBacking,
     /// Double-Array Trie
     trie: DoubleArrayTrie,
     /// Pointer to token array
@@ -100,14 +126,25 @@ impl std::fmt::Debug for SysDic {
 }
 
 impl SysDic {
-    /// Load system dictionary from memory-mapped file
+    /// Parse from a byte slice, returning a fully-initialized `SysDic`.
     ///
-    /// # Errors
-    ///
-    /// Returns an error if the file is corrupted or has invalid format.
-    pub fn from_mmap(mmap: Arc<Mmap>) -> Result<Self> {
-        let data = &mmap[..];
-
+    /// Internal helper used by both `from_mmap` and `from_bytes_owned`.
+    #[allow(clippy::type_complexity)]
+    fn parse_bytes(
+        data: &[u8],
+    ) -> Result<(
+        DoubleArrayTrie,
+        *const Token,
+        usize,
+        *const u8,
+        usize,
+        u32,
+        u32,
+        u32,
+        u32,
+        u32,
+        String,
+    )> {
         if data.len() < HEADER_SIZE {
             return Err(Error::CorruptedDictionary(format!(
                 "Dictionary file too small: {} bytes (minimum {} bytes)",
@@ -117,7 +154,6 @@ impl SysDic {
         }
 
         // Read and validate magic number
-        // magic ^ DictionaryMagicID == filesize
         let magic = LittleEndian::read_u32(&data[0..4]);
         let expected_size = magic ^ DICTIONARY_MAGIC_ID;
 
@@ -145,7 +181,6 @@ impl SysDic {
         let da_size = LittleEndian::read_u32(&data[24..28]) as usize;
         let token_size = LittleEndian::read_u32(&data[28..32]) as usize;
         let feature_size = LittleEndian::read_u32(&data[32..36]) as usize;
-        // data[36..40] is dummy/padding
 
         // Read charset (32 bytes, null-terminated)
         let charset_bytes = &data[40..72];
@@ -179,8 +214,80 @@ impl SysDic {
         let features_ptr = data[feature_offset..].as_ptr();
         let features_size = feature_size;
 
+        Ok((
+            trie,
+            tokens_ptr,
+            tokens_count,
+            features_ptr,
+            features_size,
+            version,
+            dict_type,
+            lexicon_size,
+            left_size,
+            right_size,
+            charset,
+        ))
+    }
+
+    /// Load system dictionary from memory-mapped file
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file is corrupted or has invalid format.
+    pub fn from_mmap(mmap: Arc<Mmap>) -> Result<Self> {
+        let (
+            trie,
+            tokens_ptr,
+            tokens_count,
+            features_ptr,
+            features_size,
+            version,
+            dict_type,
+            lexicon_size,
+            left_size,
+            right_size,
+            charset,
+        ) = Self::parse_bytes(mmap.as_ref())?;
         Ok(Self {
-            _mmap: mmap,
+            _backing: DataBacking::Mmap(mmap),
+            trie,
+            tokens_ptr,
+            tokens_count,
+            features_ptr,
+            features_size,
+            version,
+            dict_type,
+            lexicon_size,
+            left_size,
+            right_size,
+            charset,
+        })
+    }
+
+    /// Load system dictionary from an owned byte buffer (no filesystem required).
+    ///
+    /// Use this constructor in WASM and other no-filesystem environments.
+    /// The buffer is kept alive inside the returned `SysDic` via an `Arc`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data is corrupted or has an invalid format.
+    pub fn from_bytes_owned(data: Arc<Vec<u8>>) -> Result<Self> {
+        let (
+            trie,
+            tokens_ptr,
+            tokens_count,
+            features_ptr,
+            features_size,
+            version,
+            dict_type,
+            lexicon_size,
+            left_size,
+            right_size,
+            charset,
+        ) = Self::parse_bytes(data.as_ref())?;
+        Ok(Self {
+            _backing: DataBacking::Owned(data),
             trie,
             tokens_ptr,
             tokens_count,
@@ -311,6 +418,41 @@ impl SysDic {
     /// Get the trie size in units
     pub fn trie_size(&self) -> usize {
         self.trie.size()
+    }
+
+    /// Enumerate all `(word_id, surface_form)` pairs stored in the dictionary.
+    ///
+    /// The trie encodes `da_value = (token_start << 8) | count` per surface key.
+    /// For each surface key found, this method yields one entry per token stored
+    /// under that key (up to `count` entries).
+    ///
+    /// The `visitor` receives `(word_id: usize, surface: &str)`.  Return `true`
+    /// to continue enumeration or `false` to stop early.
+    ///
+    /// # Note on ordering
+    ///
+    /// Entries are emitted in DFS trie order (which approximates lexicographic
+    /// order for single-byte-encoded keys but is byte-order for UTF-8 multi-byte
+    /// sequences).
+    pub fn enumerate_surfaces<F>(&self, mut visitor: F)
+    where
+        F: FnMut(usize, &str) -> bool,
+    {
+        self.trie.enumerate_all(|key_bytes, da_value| {
+            let token_start = (da_value as u32 >> 8) as usize;
+            let count = (da_value as u32 & 0xff) as usize;
+            let surface = match std::str::from_utf8(key_bytes) {
+                Ok(s) => s,
+                Err(_) => return true, // skip invalid UTF-8 keys, continue enumeration
+            };
+            for i in 0..count {
+                let word_id = token_start + i;
+                if !visitor(word_id, surface) {
+                    return false;
+                }
+            }
+            true
+        });
     }
 }
 

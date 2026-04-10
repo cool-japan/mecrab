@@ -16,11 +16,23 @@
 //!                                                    (with semantic URIs)
 //! ```
 
+mod csv_export;
+mod dbpedia;
+mod entity_resolver;
+pub mod ontology;
+pub mod sysdic_writer;
 mod wikidata;
+mod wikipedia;
 
+pub use csv_export::{CsvExportConfig, CsvExportStats, export_csv_with_uris, export_index_as_csv};
+pub use dbpedia::{DBpediaProcessor, DBpediaStats};
+pub use entity_resolver::{EntityResolver, ResolvedEntity};
+pub use ontology::{OntologyEntry, OntologyFormat, OntologyStats, import_ontology};
+pub use sysdic_writer::{DicEntry, WriteSysDicStats, write_sysdic};
 pub use wikidata::{
     BuildConfig, BuildProgress, BuildResult, WikidataEntry, WikidataIndex, WikidataProcessor,
 };
+pub use wikipedia::{WikipediaProcessor, WikipediaStats};
 
 use indicatif::{ProgressBar, ProgressStyle};
 use std::path::Path;
@@ -63,7 +75,7 @@ pub fn create_spinner(msg: &str) -> ProgressBar {
     pb.set_style(
         ProgressStyle::default_spinner()
             .template("{spinner:.green} [{elapsed_precise}] {msg}")
-            .unwrap(),
+            .unwrap_or_else(|_| ProgressStyle::default_spinner()),
     );
     pb.set_message(msg.to_string());
     pb
@@ -75,7 +87,7 @@ pub fn create_progress_bar(total: u64, msg: &str) -> ProgressBar {
     pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:40.cyan/blue}] {pos}/{len} {msg}")
-            .unwrap()
+            .unwrap_or_else(|_| ProgressStyle::default_bar())
             .progress_chars("#>-"),
     );
     pb.set_message(msg.to_string());

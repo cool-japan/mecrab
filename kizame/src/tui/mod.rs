@@ -48,6 +48,8 @@ pub struct App {
     show_help: bool,
     /// Last error message (if any)
     error_message: Option<String>,
+    /// Whether to display marginal probabilities in the cost panel
+    show_probs: bool,
 }
 
 impl App {
@@ -61,6 +63,15 @@ impl App {
             scroll_offset: 0,
             show_help: false,
             error_message: None,
+            show_probs: false,
+        }
+    }
+
+    /// Create a new App from a DebugSession with probability display enabled
+    pub fn new_with_probs(session: DebugSession) -> Self {
+        Self {
+            show_probs: true,
+            ..Self::new(session)
         }
     }
 
@@ -285,7 +296,12 @@ impl App {
         lattice_view.draw(frame, chunks[0]);
 
         // Draw cost panel
-        let cost_panel = CostPanel::new(&self.session, self.selected_pos, self.selected_idx);
+        let cost_panel = CostPanel::new(
+            &self.session,
+            self.selected_pos,
+            self.selected_idx,
+            self.show_probs,
+        );
         cost_panel.draw(frame, chunks[1]);
     }
 
@@ -443,6 +459,7 @@ pub fn run_explore(
     text: &str,
     dicdir: Option<std::path::PathBuf>,
     semantic_pool: Option<std::path::PathBuf>,
+    show_probs: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let dict = match (dicdir, semantic_pool) {
         (Some(path), Some(semantic_path)) => {
@@ -452,8 +469,17 @@ pub fn run_explore(
         (None, _) => mecrab::dict::Dictionary::default_dictionary()?,
     };
 
-    let session = DebugSession::new(text, &dict)?;
-    let mut app = App::new(session);
+    let session = if show_probs {
+        DebugSession::new_with_probs(text, &dict)?
+    } else {
+        DebugSession::new(text, &dict)?
+    };
+
+    let mut app = if show_probs {
+        App::new_with_probs(session)
+    } else {
+        App::new(session)
+    };
     app.run()?;
 
     Ok(())

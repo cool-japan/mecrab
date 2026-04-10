@@ -157,4 +157,4 @@ cat large_corpus.txt | kizame -w > tokenized.txt
 
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0

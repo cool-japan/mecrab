@@ -18,7 +18,7 @@ byteorder.workspace = true
 encoding_rs.workspace = true
 thiserror.workspace = true
 yada.workspace = true
-bytemuck = "1.24"
+bytemuck = "1.25"
 
 # Optional: JSON output support
 serde = { workspace = true, optional = true }
@@ -36,13 +36,30 @@ console_error_panic_hook = { workspace = true, optional = true }
 # Optional: Python bindings
 pyo3 = { workspace = true, optional = true }
 
+# Optional: Neural reranking (BERT perplexity scoring via candle)
+candle-core = { version = "0.10", optional = true }
+candle-nn = { version = "0.10", optional = true }
+candle-transformers = { version = "0.10", optional = true }
+tokenizers = { version = "0.22", optional = true, default-features = false, features = ["onig"] }
+hf-hub = { version = "0.5", optional = true }
+
 [features]
 default = ["serde", "serde_json"]
 json = ["serde", "serde_json"]
 parallel = ["rayon"]
 simd = []  # Enable SIMD optimizations (nightly)
-wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook"]
+wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook", "serde_json"]
 python = ["pyo3/extension-module", "serde", "serde_json"]
+# Phase 3: Neural reranking — real BERT perplexity scoring via candle-core.
+# Activates NeuralReranker in mecrab::rerank::neural with lazy model loading.
+neural = [
+    "dep:candle-core",
+    "dep:candle-nn",
+    "dep:candle-transformers",
+    "dep:tokenizers",
+    "dep:hf-hub",
+    "serde_json",
+]
 
 [lib]
 name = "mecrab"

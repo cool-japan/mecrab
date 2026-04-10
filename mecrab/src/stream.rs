@@ -219,7 +219,8 @@ impl TextWindow {
         }
 
         self.current = Some(sentence);
-        self.current.as_ref().unwrap()
+        // SAFETY: we just assigned Some(sentence) above, so this cannot be None
+        self.current.as_deref().unwrap_or_default()
     }
 
     /// Get the current sentence
@@ -492,10 +493,14 @@ mod tests {
         let cursor = Cursor::new(text);
         let mut reader = SentenceReader::new(cursor, SentenceBoundary::JapanesePunctuation);
 
-        let s1 = reader.next_sentence().unwrap();
+        let s1 = reader
+            .next_sentence()
+            .expect("IO should not fail on Cursor");
         assert!(s1.is_some());
 
-        let s2 = reader.next_sentence().unwrap();
+        let s2 = reader
+            .next_sentence()
+            .expect("IO should not fail on Cursor");
         assert!(s2.is_some());
     }
 

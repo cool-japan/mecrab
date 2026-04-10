@@ -1,6 +1,6 @@
 //! Skip-gram training with negative sampling
 
-use rand::Rng;
+use rand::{Rng, RngExt};
 
 /// Skip-gram trainer with negative sampling
 pub struct SkipGram {

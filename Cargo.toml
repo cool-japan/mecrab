@@ -6,10 +6,10 @@ members = ["mecrab", "mecrab-builder", "mecrab-bench", "kizame", "mecrab-word2ve
 resolver = "2"
 
 [workspace.package]
-version = "0.1.0"
+version = "0.2.0"
 edition = "2024"
 authors = ["COOLJAPAN OU (Team KitaSan)"]
-license = "MIT OR Apache-2.0"
+license = "Apache-2.0"
 repository = "https://github.com/cool-japan/mecrab"
 rust-version = "1.85"
 
@@ -22,7 +22,7 @@ thiserror = "2.0"
 yada = "0.5"
 
 # CLI dependencies
-clap = { version = "4.5", features = ["derive", "cargo"] }
+clap = { version = "4.6", features = ["derive", "cargo"] }
 
 # Serialization
 serde = { version = "1.0", features = ["derive"] }
@@ -35,7 +35,7 @@ rayon = "1.11"
 flate2 = "1.1"
 indicatif = "0.18"
 reqwest = { version = "0.13", features = ["json", "gzip", "stream"] }
-tokio = { version = "1.49", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
+tokio = { version = "1.50", features = ["rt-multi-thread", "macros", "fs", "io-util"] }
 futures = "0.3"
 csv = "1.4"
 
@@ -46,10 +46,13 @@ web-sys = { version = "0.3", features = ["console"] }
 console_error_panic_hook = "0.1"
 
 # Python bindings
-pyo3 = { version = "0.27", features = ["extension-module"] }
+pyo3 = { version = "0.28", features = ["extension-module", "multiple-pymethods"] }
+
+# URL encoding
+urlencoding = "2"
 
 # Dev dependencies
-criterion = { version = "0.7", features = ["html_reports"] }
+criterion = { version = "0.8", features = ["html_reports"] }
 # Note: criterion 0.5 is pinned for compatibility; 0.8 requires migration
 
 [profile.release]

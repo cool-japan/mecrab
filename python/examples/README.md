@@ -264,4 +264,4 @@ Found an issue or want to add examples? Please submit a PR or issue on GitHub!
 ---
 
 **Copyright 2026 COOLJAPAN OU (Team KitaSan)**
-**License:** MIT OR Apache-2.0
+**License:** Apache-2.0

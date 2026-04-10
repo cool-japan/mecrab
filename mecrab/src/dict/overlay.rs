@@ -123,11 +123,11 @@ impl OverlayDictionary {
     /// ```
     pub fn add_word(&self, surface: &str, entry: OverlayEntry) {
         {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
             entries.entry(surface.to_string()).or_default().push(entry);
         }
         // Mark trie as dirty
-        *self.trie_dirty.write().unwrap() = true;
+        *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = true;
     }
 
     /// Add a word with simple parameters
@@ -153,24 +153,30 @@ impl OverlayDictionary {
     /// Returns true if the word was found and removed.
     pub fn remove_word(&self, surface: &str) -> bool {
         let removed = {
-            let mut entries = self.entries.write().unwrap();
+            let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
             entries.remove(surface).is_some()
         };
         if removed {
-            *self.trie_dirty.write().unwrap() = true;
+            *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = true;
         }
         removed
     }
 
     /// Rebuild the trie from current entries
     fn rebuild_trie(&self) {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
 
         if entries.is_empty() {
-            *self.trie.write().unwrap() = None;
-            *self.surface_index.write().unwrap() = HashMap::new();
-            *self.sorted_surfaces.write().unwrap() = Vec::new();
-            *self.trie_dirty.write().unwrap() = false;
+            *self.trie.write().unwrap_or_else(|e| e.into_inner()) = None;
+            *self
+                .surface_index
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = HashMap::new();
+            *self
+                .sorted_surfaces
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = Vec::new();
+            *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = false;
             return;
         }
 
@@ -195,11 +201,18 @@ impl OverlayDictionary {
 
         // Build the trie
         if let Some(da_bytes) = DoubleArrayBuilder::build(&keyset) {
-            *self.trie.write().unwrap() = Some(DoubleArray::new(da_bytes));
-            *self.surface_index.write().unwrap() = new_index;
-            *self.sorted_surfaces.write().unwrap() = surfaces;
+            *self.trie.write().unwrap_or_else(|e| e.into_inner()) =
+                Some(DoubleArray::new(da_bytes));
+            *self
+                .surface_index
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = new_index;
+            *self
+                .sorted_surfaces
+                .write()
+                .unwrap_or_else(|e| e.into_inner()) = surfaces;
         }
-        *self.trie_dirty.write().unwrap() = false;
+        *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
     /// Look up a word in the overlay dictionary
@@ -209,20 +222,23 @@ impl OverlayDictionary {
     pub fn lookup(&self, key: &str) -> Vec<DictionaryEntry> {
         // Check if trie needs rebuild
         {
-            let dirty = *self.trie_dirty.read().unwrap();
+            let dirty = *self.trie_dirty.read().unwrap_or_else(|e| e.into_inner());
             if dirty {
                 drop(self.trie_dirty.read());
                 self.rebuild_trie();
             }
         }
 
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         if entries.is_empty() {
             return Vec::new();
         }
 
-        let trie_guard = self.trie.read().unwrap();
-        let sorted_surfaces = self.sorted_surfaces.read().unwrap();
+        let trie_guard = self.trie.read().unwrap_or_else(|e| e.into_inner());
+        let sorted_surfaces = self
+            .sorted_surfaces
+            .read()
+            .unwrap_or_else(|e| e.into_inner());
         let mut results = Vec::new();
 
         if let Some(ref trie) = *trie_guard {
@@ -270,7 +286,7 @@ impl OverlayDictionary {
 
     /// Get the number of entries in the overlay
     pub fn len(&self) -> usize {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.values().map(Vec::len).sum()
     }
 
@@ -281,17 +297,23 @@ impl OverlayDictionary {
 
     /// Clear all entries from the overlay
     pub fn clear(&self) {
-        let mut entries = self.entries.write().unwrap();
+        let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         entries.clear();
-        *self.trie.write().unwrap() = None;
-        *self.surface_index.write().unwrap() = HashMap::new();
-        *self.sorted_surfaces.write().unwrap() = Vec::new();
-        *self.trie_dirty.write().unwrap() = false;
+        *self.trie.write().unwrap_or_else(|e| e.into_inner()) = None;
+        *self
+            .surface_index
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = HashMap::new();
+        *self
+            .sorted_surfaces
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = Vec::new();
+        *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = false;
     }
 
     /// Get all surface forms in the overlay
     pub fn surfaces(&self) -> Vec<String> {
-        let entries = self.entries.read().unwrap();
+        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.keys().cloned().collect()
     }
 }

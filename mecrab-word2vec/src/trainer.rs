@@ -4,7 +4,7 @@ use crate::Result;
 use crate::model::TrainingConfig;
 use crate::skipgram::SkipGram;
 use crate::vocab::Vocabulary;
-use rand::Rng;
+use rand::{Rng, RngExt};
 use rayon::prelude::*;
 use std::fs::File;
 use std::io::{BufRead, BufReader};

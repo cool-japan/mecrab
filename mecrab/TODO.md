@@ -47,13 +47,17 @@
 ## Planned
 
 ### Performance
-- [ ] AVX-512 Viterbi optimization
-- [ ] SoA (Struct of Arrays) layout
-- [ ] Dictionary preloading/caching
+- [x] AVX-512 Viterbi optimization (implemented as AVX2/SSE4.1 — the production-relevant x86_64 targets)
+- [x] SoA (Struct of Arrays) layout — ViterbiTable with separate hot costs / cold backtrack vecs
+- [x] Dictionary preloading/caching
+- [x] Character info lookup caching (CharDefCached — 256-slot direct-mapped cache)
 
 ### Features
-- [ ] ARM NEON SIMD support
-- [ ] WASM SIMD support
+- [x] ARM NEON SIMD support — vld1q_s32/vminq_s32/vminvq_s32 in viterbi/simd.rs
+- [x] WASM SIMD support
+
+### Batch API
+- [x] Batch parsing API improvements (parse_batch_with_progress, parse_iter, wakati_iter, parse_nbest_batch, wakati_batch_with_progress)
 
 ### Bindings
 - [x] Python bindings packaging

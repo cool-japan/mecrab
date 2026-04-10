@@ -7,20 +7,27 @@
 //!
 //! Reference: ../ref/mecab-0.996/src/dictionary.cpp
 
+mod cached_matrix;
 mod char_def;
 mod connection_matrix;
 mod double_array_trie;
 mod feature;
 mod overlay;
+pub mod provider;
 mod sys_dic;
 mod unknown;
 pub mod user_dict;
 
-pub use char_def::{CharCategory, CharDef, CharInfo};
+pub use cached_matrix::CachedMatrix;
+pub use char_def::{CharCategory, CharDef, CharDefCached, CharInfo};
 pub use connection_matrix::ConnectionMatrix;
 pub use double_array_trie::{DartsResult, DoubleArrayTrie};
 pub use feature::FeatureTable;
 pub use overlay::{OverlayDictionary, OverlayEntry};
+pub use provider::{
+    AutoDetectProvider, DictionaryFormat, DictionaryProvider, IpadicProvider, MorphemeFeatures,
+    NeologdProvider, UnidicProvider,
+};
 pub use sys_dic::{SysDic, Token};
 pub use unknown::UnknownDictionary;
 pub use user_dict::{DictFormat, UserDictManager, UserDictStats, UserEntry, ValidationResult};
@@ -181,6 +188,47 @@ impl Dictionary {
         Ok(mmap)
     }
 
+    /// Load a dictionary from raw byte slices (no filesystem access required).
+    ///
+    /// This is the primary entry point for WASM / in-memory dictionary loading.
+    /// Each slice must contain the exact binary content of the corresponding file:
+    ///
+    /// | Parameter  | Corresponding file |
+    /// |------------|--------------------|
+    /// | `sys_dic`  | `sys.dic`          |
+    /// | `matrix`   | `matrix.bin`       |
+    /// | `char_def` | `char.bin`         |
+    /// | `unk_def`  | `unk.dic`          |
+    ///
+    /// The slices are copied into owned `Arc<Vec<u8>>` buffers so the caller
+    /// does not need to keep them alive.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any component is corrupted or has an invalid format.
+    pub fn from_bytes(
+        sys_dic: &[u8],
+        matrix: &[u8],
+        char_def: &[u8],
+        unk_def: &[u8],
+    ) -> Result<Self> {
+        let sys_dic = SysDic::from_bytes_owned(Arc::new(sys_dic.to_vec()))?;
+        let matrix = ConnectionMatrix::from_bytes_owned(Arc::new(matrix.to_vec()))?;
+        let char_def = CharDef::from_bytes_owned(Arc::new(char_def.to_vec()))?;
+        let unknown = UnknownDictionary::from_bytes_owned(Arc::new(unk_def.to_vec()))?;
+
+        Ok(Self {
+            sys_dic,
+            unknown,
+            matrix,
+            char_def,
+            overlay: OverlayDictionary::new(),
+            semantic_pool: None,
+            surface_map: None,
+            _mmaps: Vec::new(),
+        })
+    }
+
     /// Try to load the default dictionary from standard locations
     ///
     /// # Errors
@@ -331,6 +379,25 @@ impl Dictionary {
     /// Get the number of entries in the dictionary
     pub fn size(&self) -> usize {
         self.sys_dic.lexicon_size()
+    }
+
+    /// Sample the number of comma-separated feature fields from the first available token.
+    ///
+    /// Returns `None` if the dictionary contains no tokens or the feature string is empty.
+    /// This is used by the auto-detection pipeline to choose the correct
+    /// `DictionaryProvider` without requiring the caller to know the format in advance.
+    pub fn sample_feature_count(&self) -> Option<usize> {
+        let token_count = self.sys_dic.token_count();
+        for idx in 0..token_count {
+            if let Some(token) = self.sys_dic.token_at(idx) {
+                let feature = self.sys_dic.get_feature(token);
+                if !feature.is_empty() {
+                    let count = feature.split(',').count();
+                    return Some(count);
+                }
+            }
+        }
+        None
     }
 }
 

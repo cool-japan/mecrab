@@ -75,6 +75,10 @@ pub enum Error {
     /// Vector store error
     #[error("Vector store error: {0}")]
     VectorError(String),
+
+    /// I/O error (string form, for callers that wrap std::io::Error messages)
+    #[error("I/O error: {0}")]
+    IoError(String),
 }
 
 impl From<std::fmt::Error> for Error {

@@ -52,6 +52,24 @@ impl UnknownDictionary {
         Ok(Self { inner })
     }
 
+    /// Load unknown word dictionary from an owned byte buffer (no filesystem required).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the data is corrupted or the dictionary type does not match.
+    pub fn from_bytes_owned(data: Arc<Vec<u8>>) -> Result<Self> {
+        let inner = SysDic::from_bytes_owned(data)?;
+
+        if inner.dict_type() != super::MECAB_UNK_DIC {
+            return Err(Error::InvalidDictionaryFormat(format!(
+                "Expected unknown dictionary (type=2), got type={}",
+                inner.dict_type()
+            )));
+        }
+
+        Ok(Self { inner })
+    }
+
     /// Look up entries for a category name
     ///
     /// The category name should match the names from char.def

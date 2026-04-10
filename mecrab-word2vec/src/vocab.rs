@@ -80,7 +80,7 @@ impl Vocabulary {
             .collect();
 
         // Sort by frequency (descending) for better cache locality
-        word_list.sort_by(|a, b| b.1.cmp(&a.1));
+        word_list.sort_by_key(|b| std::cmp::Reverse(b.1));
 
         // Assign remapped_ids 0, 1, 2, ... (dense indexing)
         for (remapped_id, (word_id, count)) in word_list.into_iter().enumerate() {
@@ -125,10 +125,14 @@ impl Vocabulary {
             self.min_count,
             self.words.len()
         );
-        eprintln!(
-            "  Remapped IDs: 0-{} (dense indexing)",
-            self.words.len() - 1
-        );
+        if self.words.is_empty() {
+            eprintln!("  Remapped IDs: (empty vocabulary)");
+        } else {
+            eprintln!(
+                "  Remapped IDs: 0-{} (dense indexing)",
+                self.words.len() - 1
+            );
+        }
         eprintln!(
             "  Fast lookup table: {} entries",
             self.word_id_to_remapped.len()

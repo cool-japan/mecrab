@@ -58,10 +58,10 @@ cargo install kizame --features builder
 
 ```toml
 [dependencies]
-mecrab = "0.1"
+mecrab = "0.2"
 
 # Optional features
-mecrab = { version = "0.1", features = ["json", "parallel"] }
+mecrab = { version = "0.2", features = ["json", "parallel"] }
 ```
 
 ## Quick Start
@@ -248,9 +248,24 @@ cd fuzz && cargo +nightly fuzz run viterbi
 - 0 clippy warnings
 - 83% parallel efficiency (Word2Vec training)
 
+## Sponsorship
+
+MeCrab is developed and maintained by **COOLJAPAN OU (Team Kitasan)**.
+
+If you find MeCrab useful, please consider sponsoring the project to support continued development of the Pure Rust ecosystem.
+
+[![Sponsor](https://img.shields.io/badge/Sponsor-%E2%9D%A4-red?logo=github)](https://github.com/sponsors/cool-japan)
+
+**[https://github.com/sponsors/cool-japan](https://github.com/sponsors/cool-japan)**
+
+Your sponsorship helps us:
+- Maintain and improve the COOLJAPAN ecosystem
+- Keep the entire ecosystem (OxiBLAS, OxiFFT, SciRS2, etc.) 100% Pure Rust
+- Provide long-term support and security updates
+
 ## License
 
-MIT OR Apache-2.0
+Apache-2.0
 
 ## Copyright
 
