@@ -72,6 +72,9 @@ pub enum Format {
     LatticeProb,
     /// SentencePiece-compatible format with ▁ word-initial markers
     BpeCompatible,
+    /// CoNLL-U Universal Dependencies format
+    #[value(name = "conllu")]
+    ConllU,
 }
 
 impl From<Format> for OutputFormat {
@@ -87,6 +90,7 @@ impl From<Format> for OutputFormat {
             Format::Nquads => OutputFormat::Nquads,
             Format::LatticeProb => OutputFormat::LatticeProb,
             Format::BpeCompatible => OutputFormat::BpeCompatible,
+            Format::ConllU => OutputFormat::ConllU,
         }
     }
 }

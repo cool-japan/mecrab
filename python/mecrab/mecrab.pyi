@@ -585,6 +585,65 @@ class MeCrab:
         """
         ...
 
+    def parse_conllu(self, text: str) -> str:
+        """Parse text and return Universal Dependencies CoNLL-U format.
+
+        Produces tab-separated 10-field token lines with:
+        - FORM: surface form
+        - LEMMA: base form (IPADIC field 6, or FORM if unavailable)
+        - UPOS: Universal POS tag (mapped from IPADIC)
+        - XPOS: IPADIC POS with sub-categories joined by hyphen
+        - FEATS: morphological features (VerbForm, Mood) or ``_``
+        - HEAD: rule-based heuristic Japanese dependency head (1-based)
+        - DEPREL: UD dependency relation (nsubj, obj, case, aux, etc.)
+        - MISC: SpaceAfter=No (Japanese has no spaces between words)
+
+        Each analysis ends with a blank line (sentence boundary marker).
+        Compatible with Universal Dependencies treebank tools.
+
+        Args:
+            text: Input Japanese text
+
+        Returns:
+            CoNLL-U formatted string
+
+        Raises:
+            RuntimeError: If parsing fails
+
+        Example:
+            >>> result = mecrab.parse_conllu("東京は日本の首都です")
+            >>> print(result)
+            # sent_id = 1
+            # text = 東京は日本の首都です
+            1\t東京\t東京\tPROPN\t名詞-固有名詞-地域-一般\t_\t4\tnsubj\t_\tSpaceAfter=No
+            ...
+        """
+        ...
+
+    def parse_conllu_batch(self, texts: List[str]) -> List[str]:
+        """Parse multiple texts and return CoNLL-U format for each.
+
+        Uses parallel processing (Rayon) internally and releases the GIL
+        so other Python threads can run concurrently.
+
+        Args:
+            texts: List of input Japanese texts
+
+        Returns:
+            List of CoNLL-U formatted strings, one per input text.
+            Each string ends with a blank line (sentence boundary).
+
+        Raises:
+            RuntimeError: If any parsing fails
+
+        Example:
+            >>> texts = ["東京は日本の首都です", "大阪は関西の中心地です"]
+            >>> results = mecrab.parse_conllu_batch(texts)
+            >>> for r in results:
+            ...     print(r)
+        """
+        ...
+
     def parse_with_probs_batch(
         self, texts: List[str]
     ) -> List[Tuple[AnalysisResult, List[Dict[str, Any]]]]:

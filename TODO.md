@@ -2,6 +2,22 @@
 
 ## v0.3.0 Implemented
 
+### Phase 3.3 - Interoperability & Subword
+
+- [x] CoNLL-U output format (Universal Dependencies, `kizame parse -O conllu`)
+- [x] IPADIC → UPOS tag mapping (Universal POS)
+- [x] Morphological FEATS in UD format (VerbForm, Mood from 活用形)
+- [x] FastText subword character n-gram embeddings (mecrab-word2vec)
+- [x] OOV word embedding via character n-gram sum (`embed_surface()`)
+- [x] `Word2VecBuilder::with_subword(min_n, max_n, bucket_count)` API
+- [x] FNV-1a n-gram hash bucketing (bucket_count=2M default)
+- [x] Hogwild! training with subword gradient updates
+- [x] `kizame vectors train --subword-min-n --subword-max-n --bucket-count --surface-map` CLI flags
+- [x] WASM binding: `parseConllu()` (JS: `MeCrabWasm.parseConllu(text)`)
+- [x] Python binding: `parse_conllu()` + `parse_conllu_batch()` (GIL-release)
+- [x] HTTP server: `?format=conllu` on `/parse` and `/parse/batch`
+- [x] Heuristic Japanese dependency HEAD/DEPREL in CoNLL-U (SOV rules)
+
 ### Phase 3.2 - LLM-Ready Output Formats
 - [x] Forward-backward algorithm (LatticeProbTable, NodeMarginal, log_sum_exp)
 - [x] LatticeProb output format (JSON with marginal probabilities)

@@ -8,6 +8,7 @@
 //! - Multi-threaded training with Rayon
 //! - Direct MCV1 format output
 //! - Memory-efficient streaming
+//! - FastText-style subword character n-gram embeddings
 //!
 //! # Example
 //!
@@ -30,11 +31,13 @@
 
 mod io;
 mod model;
+pub mod subword;
 mod skipgram;
 mod trainer;
 mod vocab;
 
-pub use model::{Word2Vec, Word2VecBuilder};
+pub use model::{SubwordConfig, Word2Vec, Word2VecBuilder};
+pub use subword::CharNgramExtractor;
 pub use vocab::Vocabulary;
 
 use thiserror::Error;
@@ -335,5 +338,240 @@ mod integration_tests {
         }
 
         let _ = std::fs::remove_file(&corpus_path);
+    }
+
+    // ── Subword embedding tests ───────────────────────────────────────────────
+
+    #[test]
+    fn test_subword_config_defaults() {
+        let cfg = SubwordConfig::default();
+        assert_eq!(cfg.min_n, 3, "default min_n must be 3");
+        assert_eq!(cfg.max_n, 6, "default max_n must be 6");
+        assert_eq!(cfg.bucket_count, 2_000_000, "default bucket_count must be 2_000_000");
+    }
+
+    #[test]
+    fn test_subword_extractor_basic() {
+        let ext = CharNgramExtractor::new(2, 3, 100);
+        let ids = ext.extract_bucket_ids("東京");
+        // Should have multiple n-gram bucket IDs, all < 100
+        assert!(!ids.is_empty(), "n-gram extraction must not be empty for non-trivial input");
+        assert!(
+            ids.iter().all(|&id| id < 100),
+            "all bucket IDs must be in [0, bucket_count)"
+        );
+        // Should be sorted and deduplicated
+        assert!(
+            ids.windows(2).all(|w| w[0] <= w[1]),
+            "bucket IDs must be sorted"
+        );
+        // All elements must be unique (deduplicated)
+        let deduped: std::collections::HashSet<u32> = ids.iter().cloned().collect();
+        assert_eq!(deduped.len(), ids.len(), "bucket IDs must be deduplicated");
+    }
+
+    #[test]
+    fn test_subword_fasttext_oov_embedding() {
+        let corpus_path = make_corpus_file(&tiny_corpus());
+
+        // Build a model with subword enabled using a small bucket_count for speed
+        let mut model = Word2VecBuilder::new()
+            .vector_size(8)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(1)
+            .threads(1)
+            .with_subword(2, 3, 1000) // small bucket_count for test speed
+            .build_from_corpus(&corpus_path)
+            .expect("build_from_corpus with subword should succeed");
+
+        // syn_ng must be allocated: bucket_count * vector_size
+        assert_eq!(
+            model.syn_ng.len(),
+            1000 * 8,
+            "syn_ng must have bucket_count * vector_size elements"
+        );
+
+        // Train the model
+        model
+            .train_from_file(&corpus_path)
+            .expect("train_from_file with subword should succeed");
+
+        // embed_surface on an OOV surface must return Some(vec) with at least one non-zero
+        let oov_surface = "東京";
+        let embedding = model.embed_surface(oov_surface);
+        assert!(
+            embedding.is_some(),
+            "embed_surface must return Some for a non-trivial OOV surface"
+        );
+        let embedding = embedding.expect("already checked Some");
+        assert_eq!(
+            embedding.len(),
+            8,
+            "OOV embedding length must equal vector_size"
+        );
+        let any_non_zero = embedding.iter().any(|&v| v != 0.0);
+        assert!(any_non_zero, "OOV embedding must have at least one non-zero value after training");
+
+        let _ = std::fs::remove_file(&corpus_path);
+    }
+
+    #[test]
+    fn test_subword_model_without_subword_returns_none() {
+        let corpus_path = make_corpus_file(&tiny_corpus());
+
+        let model = Word2VecBuilder::new()
+            .vector_size(8)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(1)
+            .threads(1)
+            // No .with_subword() — subword disabled
+            .build_from_corpus(&corpus_path)
+            .expect("build_from_corpus");
+
+        // embed_surface must return None when subword is not configured
+        let result = model.embed_surface("東京");
+        assert!(
+            result.is_none(),
+            "embed_surface must return None when subword is not configured"
+        );
+
+        let _ = std::fs::remove_file(&corpus_path);
+    }
+
+    #[test]
+    fn test_embed_word_with_subword_in_vocab() {
+        let corpus_path = make_corpus_file(&tiny_corpus());
+
+        let mut model = Word2VecBuilder::new()
+            .vector_size(8)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(1)
+            .threads(1)
+            .with_subword(2, 3, 1000)
+            .build_from_corpus(&corpus_path)
+            .expect("build_from_corpus");
+
+        model
+            .train_from_file(&corpus_path)
+            .expect("train_from_file");
+
+        // Word ID 0 is in vocabulary; look up its remapped ID
+        let vocab = model.vocab();
+        let remapped = vocab.get(0).map(|info| info.remapped_id);
+
+        let embedding = model.embed_word_with_subword(remapped, "word_0_surface");
+        assert!(
+            embedding.is_some(),
+            "embed_word_with_subword must return Some for an in-vocab word"
+        );
+        let embedding = embedding.expect("already checked Some");
+        assert_eq!(embedding.len(), 8, "embedding length must equal vector_size");
+
+        let _ = std::fs::remove_file(&corpus_path);
+    }
+
+    #[test]
+    fn test_subword_save_load_roundtrip() {
+        let corpus = make_corpus_file(&tiny_corpus());
+        let surface_map: std::collections::HashMap<u32, String> = [
+            (0u32, "東京".to_string()),
+            (1u32, "は".to_string()),
+            (2u32, "日本".to_string()),
+            (3u32, "の".to_string()),
+            (4u32, "首都".to_string()),
+            (5u32, "です".to_string()),
+            (6u32, "大阪".to_string()),
+            (7u32, "京都".to_string()),
+            (8u32, "神戸".to_string()),
+            (9u32, "名古屋".to_string()),
+        ]
+        .into_iter()
+        .collect();
+
+        let mut model = Word2VecBuilder::new()
+            .vector_size(8)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(1)
+            .threads(1)
+            .with_subword(2, 3, 1000) // small bucket count for test speed
+            .build_from_corpus(&corpus)
+            .expect("build_from_corpus");
+
+        model.set_surface_map(surface_map);
+        model.train_from_file(&corpus).expect("train_from_file");
+
+        // Get embedding before save
+        let before = model.embed_surface("テスト").expect("should embed");
+
+        // Save subword table
+        let dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let subword_path = dir.join(format!("mecrab_subword_test_{nanos}.subword"));
+        model.save_subword_text(&subword_path).expect("save_subword_text");
+
+        // Load into a fresh model (no subword config set — simulate inference deployment)
+        let mut model2 = Word2VecBuilder::new()
+            .vector_size(8)
+            .min_count(1)
+            .build_from_corpus(&corpus)
+            .expect("build_from_corpus for model2");
+
+        model2.load_subword_text(&subword_path).expect("load_subword_text");
+
+        // Embedding after load should match
+        let after = model2.embed_surface("テスト").expect("should embed after load");
+
+        assert_eq!(before.len(), after.len(), "vector length must match");
+        for (a, b) in before.iter().zip(after.iter()) {
+            assert!(
+                (a - b).abs() < 1e-5,
+                "values must be close after round-trip: {a} vs {b}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&corpus);
+        let _ = std::fs::remove_file(&subword_path);
+    }
+
+    #[test]
+    fn test_save_subword_no_op_when_disabled() {
+        // Model without subword: save_subword_text should be a silent no-op
+        let corpus = make_corpus_file(&tiny_corpus());
+        let mut model = Word2VecBuilder::new()
+            .vector_size(4)
+            .min_count(1)
+            .epochs(1)
+            .threads(1)
+            .build_from_corpus(&corpus)
+            .expect("build");
+        model.train_from_file(&corpus).expect("train");
+
+        let dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!("mecrab_subword_noop_{nanos}.subword"));
+        // Should silently do nothing (no subword config set)
+        model.save_subword_text(&path).expect("should succeed silently");
+        // File should NOT be created for a non-subword model
+        // (or it might be created empty — either behavior is acceptable)
+        // Just verify no panic and returns Ok
+
+        let _ = std::fs::remove_file(&corpus);
+        let _ = std::fs::remove_file(&path); // might not exist — ignore error
     }
 }

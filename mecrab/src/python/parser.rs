@@ -405,6 +405,66 @@ impl PyMeCrab {
         })
     }
 
+    /// Parse text and return analysis in CoNLL-U (Universal Dependencies) format.
+    ///
+    /// Produces tab-separated 10-field lines with Universal POS tags, morphological
+    /// features, base forms (LEMMA), and heuristic dependency HEAD/DEPREL for Japanese.
+    /// Each sentence ends with a blank line. Compatible with UD treebank tools.
+    ///
+    /// Args:
+    ///     text: Input Japanese text
+    ///
+    /// Returns:
+    ///     CoNLL-U formatted string
+    ///
+    /// Raises:
+    ///     RuntimeError: If parsing fails
+    pub fn parse_conllu(&self, text: &str) -> PyResult<String> {
+        self.inner
+            .parse(text)
+            .map(|result| {
+                let formatted = crate::AnalysisResult {
+                    morphemes: result.morphemes,
+                    format: crate::OutputFormat::ConllU,
+                };
+                format!("{formatted}")
+            })
+            .map_err(|e| PyRuntimeError::new_err(format!("Parse error: {e}")))
+    }
+
+    /// Parse multiple texts in parallel and return CoNLL-U format.
+    ///
+    /// Uses the GIL-release pattern so other Python threads can run while Rust parses.
+    ///
+    /// Args:
+    ///     texts: List of input texts
+    ///
+    /// Returns:
+    ///     List of CoNLL-U formatted strings (one per input text)
+    ///
+    /// Raises:
+    ///     RuntimeError: If any parsing fails
+    #[pyo3(text_signature = "(self, texts, /)")]
+    pub fn parse_conllu_batch(&self, py: Python<'_>, texts: Vec<String>) -> PyResult<Vec<String>> {
+        py.detach(|| {
+            texts
+                .iter()
+                .map(|t| {
+                    self.inner
+                        .parse(t)
+                        .map(|result| {
+                            let formatted = crate::AnalysisResult {
+                                morphemes: result.morphemes,
+                                format: crate::OutputFormat::ConllU,
+                            };
+                            format!("{formatted}")
+                        })
+                        .map_err(|e| PyRuntimeError::new_err(format!("Parse error: {e}")))
+                })
+                .collect::<PyResult<Vec<_>>>()
+        })
+    }
+
     /// Parse multiple texts and return analysis results with marginal probabilities.
     ///
     /// For each text, uses the forward-backward algorithm to compute

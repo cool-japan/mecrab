@@ -3,9 +3,11 @@
 use crate::Result;
 use crate::model::TrainingConfig;
 use crate::skipgram::SkipGram;
+use crate::subword::CharNgramExtractor;
 use crate::vocab::Vocabulary;
 use rand::{Rng, RngExt};
 use rayon::prelude::*;
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
@@ -17,6 +19,10 @@ pub struct Trainer {
     corpus_path: PathBuf,
     vocab: Arc<Vocabulary>,
     config: TrainingConfig,
+    /// Optional surface map: word_id → surface string for subword training
+    surface_map: Option<HashMap<u32, String>>,
+    /// Optional n-gram extractor (initialised when subword is configured)
+    extractor: Option<CharNgramExtractor>,
 }
 
 impl Trainer {
@@ -26,7 +32,21 @@ impl Trainer {
             corpus_path: corpus_path.to_path_buf(),
             vocab,
             config: config.clone(),
+            surface_map: None,
+            extractor: None,
         }
+    }
+
+    /// Attach a surface map (word_id → surface) for subword training.
+    pub fn with_surface_map(mut self, surface_map: HashMap<u32, String>) -> Self {
+        self.surface_map = Some(surface_map);
+        self
+    }
+
+    /// Attach a pre-built n-gram extractor.
+    pub fn with_subword_extractor(mut self, extractor: CharNgramExtractor) -> Self {
+        self.extractor = Some(extractor);
+        self
     }
 
     /// Train the model using Hogwild! algorithm
@@ -36,9 +56,14 @@ impl Trainer {
     /// and don't affect convergence in practice.
     ///
     /// Reference: "Hogwild!: A Lock-Free Approach to Parallelizing SGD" (NIPS 2011)
-    pub fn train(&mut self, syn0: &mut [f32], syn1neg: &mut [f32]) -> Result<()> {
+    pub fn train(
+        &mut self,
+        syn0: &mut [f32],
+        syn1neg: &mut [f32],
+        syn_ng: &mut [f32],
+    ) -> Result<()> {
         let vocab_size = self.vocab.len();
-        let array_size = syn0.len(); // Actual array size: (max_word_id + 1) * vector_size
+        let array_size = syn0.len(); // Actual array size: vocab_size * vector_size
 
         eprintln!("\nStarting training using file {:?}", self.corpus_path);
         eprintln!("Vocab size: {}", vocab_size);
@@ -65,13 +90,48 @@ impl Trainer {
         // Store as usize to make it Send (raw pointers are not Send)
         let syn0_addr = syn0.as_mut_ptr() as usize;
         let syn1neg_addr = syn1neg.as_mut_ptr() as usize;
+        let syn_ng_addr = if syn_ng.is_empty() {
+            0usize
+        } else {
+            syn_ng.as_mut_ptr() as usize
+        };
         let vector_size = self.config.vector_size;
+        let syn0_array_size = array_size;
+        let syn1neg_array_size = syn1neg.len();
+        let syn_ng_array_size = syn_ng.len();
+
+        let use_subword = self.extractor.is_some() && syn_ng_addr != 0;
 
         // Load corpus once into memory (reuse across all epochs)
         eprintln!("Loading corpus into memory...");
         let sentences = self.load_corpus()?;
         let total_sentences = sentences.len();
         eprintln!("Loaded {} sentences", total_sentences);
+
+        // Build pre-computed bucket_ids per word_id (if subword enabled)
+        // This avoids string allocation on every training pair inside the hot loop.
+        let bucket_ids_per_word: Arc<Option<HashMap<u32, Vec<u32>>>> = if use_subword {
+            if let Some(ref extractor) = self.extractor {
+                let mut map: HashMap<u32, Vec<u32>> = HashMap::new();
+                for info in self.vocab.iter() {
+                    let word_id = info.word_id;
+                    let surface = match &self.surface_map {
+                        Some(sm) => sm
+                            .get(&word_id)
+                            .cloned()
+                            .unwrap_or_else(|| word_id.to_string()),
+                        None => word_id.to_string(),
+                    };
+                    let ids = extractor.extract_bucket_ids(&surface);
+                    map.insert(word_id, ids);
+                }
+                Arc::new(Some(map))
+            } else {
+                Arc::new(None)
+            }
+        } else {
+            Arc::new(None)
+        };
 
         // Train for multiple epochs
         for epoch in 0..self.config.epochs {
@@ -101,6 +161,11 @@ impl Trainer {
                 // The original memory is guaranteed to be valid for training duration
                 let syn0_ptr = syn0_addr as *mut f32;
                 let syn1neg_ptr = syn1neg_addr as *mut f32;
+                let syn_ng_ptr = if syn_ng_addr != 0 {
+                    syn_ng_addr as *mut f32
+                } else {
+                    std::ptr::null_mut()
+                };
 
                 // Thread-local counter to reduce atomic operation frequency
                 let mut local_word_count = 0u64;
@@ -130,44 +195,115 @@ impl Trainer {
                         // Dynamic window size
                         let window = rng.random_range(1..=self.config.window_size);
 
-                        // Train with context words - SAFETY: using Hogwild! algorithm
-                        for offset in 1..=window {
-                            // Left context
-                            if pos >= offset {
-                                let context_id = sentence[pos - offset];
-                                if self.vocab.contains(context_id) {
-                                    unsafe {
-                                        self.train_word_pair_hogwild(
-                                            center_id,
-                                            context_id,
-                                            current_alpha,
-                                            syn0_ptr,
-                                            syn1neg_ptr,
-                                            vector_size,
-                                            array_size,
-                                            &skipgram,
-                                            &mut rng,
-                                        );
+                        if use_subword && !syn_ng_ptr.is_null() {
+                            // Subword training path
+                            let center_bucket_ids = bucket_ids_per_word
+                                .as_ref()
+                                .as_ref()
+                                .and_then(|m| m.get(&center_id))
+                                .map(|v| v.as_slice())
+                                .unwrap_or(&[]);
+
+                            let center_remapped = match self.vocab.get_remapped_id(center_id) {
+                                Some(id) => id,
+                                None => continue,
+                            };
+
+                            for offset in 1..=window {
+                                // Left context
+                                if pos >= offset {
+                                    let context_id = sentence[pos - offset];
+                                    if let Some(context_remapped) =
+                                        self.vocab.get_remapped_id(context_id)
+                                    {
+                                        // SAFETY: Hogwild! — same safety as non-subword path
+                                        unsafe {
+                                            self.train_word_pair_subword_hogwild(
+                                                center_remapped,
+                                                center_bucket_ids,
+                                                context_remapped,
+                                                current_alpha,
+                                                syn0_ptr,
+                                                syn1neg_ptr,
+                                                syn_ng_ptr,
+                                                vector_size,
+                                                syn0_array_size,
+                                                syn1neg_array_size,
+                                                syn_ng_array_size,
+                                                &skipgram,
+                                                &mut rng,
+                                            );
+                                        }
+                                    }
+                                }
+
+                                // Right context
+                                if pos + offset < sentence.len() {
+                                    let context_id = sentence[pos + offset];
+                                    if let Some(context_remapped) =
+                                        self.vocab.get_remapped_id(context_id)
+                                    {
+                                        // SAFETY: Hogwild!
+                                        unsafe {
+                                            self.train_word_pair_subword_hogwild(
+                                                center_remapped,
+                                                center_bucket_ids,
+                                                context_remapped,
+                                                current_alpha,
+                                                syn0_ptr,
+                                                syn1neg_ptr,
+                                                syn_ng_ptr,
+                                                vector_size,
+                                                syn0_array_size,
+                                                syn1neg_array_size,
+                                                syn_ng_array_size,
+                                                &skipgram,
+                                                &mut rng,
+                                            );
+                                        }
                                     }
                                 }
                             }
+                        } else {
+                            // Standard (non-subword) training path
+                            for offset in 1..=window {
+                                // Left context
+                                if pos >= offset {
+                                    let context_id = sentence[pos - offset];
+                                    if self.vocab.contains(context_id) {
+                                        unsafe {
+                                            self.train_word_pair_hogwild(
+                                                center_id,
+                                                context_id,
+                                                current_alpha,
+                                                syn0_ptr,
+                                                syn1neg_ptr,
+                                                vector_size,
+                                                array_size,
+                                                &skipgram,
+                                                &mut rng,
+                                            );
+                                        }
+                                    }
+                                }
 
-                            // Right context
-                            if pos + offset < sentence.len() {
-                                let context_id = sentence[pos + offset];
-                                if self.vocab.contains(context_id) {
-                                    unsafe {
-                                        self.train_word_pair_hogwild(
-                                            center_id,
-                                            context_id,
-                                            current_alpha,
-                                            syn0_ptr,
-                                            syn1neg_ptr,
-                                            vector_size,
-                                            array_size,
-                                            &skipgram,
-                                            &mut rng,
-                                        );
+                                // Right context
+                                if pos + offset < sentence.len() {
+                                    let context_id = sentence[pos + offset];
+                                    if self.vocab.contains(context_id) {
+                                        unsafe {
+                                            self.train_word_pair_hogwild(
+                                                center_id,
+                                                context_id,
+                                                current_alpha,
+                                                syn0_ptr,
+                                                syn1neg_ptr,
+                                                vector_size,
+                                                array_size,
+                                                &skipgram,
+                                                &mut rng,
+                                            );
+                                        }
                                     }
                                 }
                             }
@@ -335,6 +471,154 @@ impl Trainer {
             }
 
             loss
+        }
+    }
+
+    /// Train one word pair with FastText subword n-gram representations (Hogwild!).
+    ///
+    /// The center word's effective input vector is the sum of its syn0 embedding
+    /// and the syn_ng embeddings of all its character n-gram buckets.
+    ///
+    /// Gradients are backpropagated to BOTH syn0 and all syn_ng buckets, scaled
+    /// by `1.0 / (1.0 + num_buckets)` to normalise relative contributions.
+    ///
+    /// SAFETY: Same Hogwild! assumptions as `train_word_pair_hogwild`:
+    /// - All pointers are valid for the duration of training
+    /// - Memory is large enough for all remapped IDs and bucket IDs
+    /// - Concurrent unsynchronised access is acceptable (Hogwild! assumption)
+    #[inline]
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    unsafe fn train_word_pair_subword_hogwild(
+        &self,
+        center_remapped_id: u32,
+        center_bucket_ids: &[u32],
+        context_remapped_id: u32,
+        alpha: f32,
+        syn0_ptr: *mut f32,
+        syn1neg_ptr: *mut f32,
+        syn_ng_ptr: *mut f32,
+        vector_size: usize,
+        syn0_array_size: usize,
+        syn1neg_array_size: usize,
+        syn_ng_array_size: usize,
+        skipgram: &Arc<SkipGram>,
+        rng: &mut impl Rng,
+    ) {
+        unsafe {
+            let l1 = center_remapped_id as usize * vector_size;
+            if l1 + vector_size > syn0_array_size {
+                return;
+            }
+
+            // ── Step 1: Build the composite center vector h ──────────────────
+            // h = syn0[center] + Σ syn_ng[bucket] for each bucket
+            let mut h = vec![0.0f32; vector_size];
+
+            // Add syn0 contribution
+            let center_vec = syn0_ptr.add(l1);
+            for i in 0..vector_size {
+                h[i] = *center_vec.add(i);
+            }
+
+            // Add n-gram bucket contributions
+            for &bucket_id in center_bucket_ids {
+                let ng_offset = bucket_id as usize * vector_size;
+                if ng_offset + vector_size <= syn_ng_array_size {
+                    let ng_vec = syn_ng_ptr.add(ng_offset);
+                    for i in 0..vector_size {
+                        h[i] += *ng_vec.add(i);
+                    }
+                }
+            }
+
+            // ── Step 2: Gradient accumulator ─────────────────────────────────
+            let mut neu1e = vec![0.0f32; vector_size];
+
+            // ── Step 3: Positive sample ───────────────────────────────────────
+            {
+                let label = 1.0f32;
+                let l2 = context_remapped_id as usize * vector_size;
+                if l2 + vector_size <= syn1neg_array_size {
+                    let context_vec = syn1neg_ptr.add(l2);
+
+                    let mut f = 0.0f32;
+                    for i in 0..vector_size {
+                        f += h[i] * *context_vec.add(i);
+                    }
+
+                    let sigmoid_f = if f > 6.0 {
+                        1.0
+                    } else if f < -6.0 {
+                        0.0
+                    } else {
+                        1.0 / (1.0 + (-f).exp())
+                    };
+
+                    let g = (label - sigmoid_f) * alpha;
+
+                    for i in 0..vector_size {
+                        neu1e[i] += g * *context_vec.add(i);
+                        *context_vec.add(i) += g * h[i];
+                    }
+                }
+            }
+
+            // ── Step 4: Negative samples ──────────────────────────────────────
+            for _ in 0..self.config.negative_samples {
+                let neg_remapped = skipgram.sample_negative(rng);
+
+                if neg_remapped == context_remapped_id {
+                    continue;
+                }
+
+                let label = 0.0f32;
+                let l2 = neg_remapped as usize * vector_size;
+                if l2 + vector_size > syn1neg_array_size {
+                    continue;
+                }
+
+                let neg_vec = syn1neg_ptr.add(l2);
+
+                let mut f = 0.0f32;
+                for i in 0..vector_size {
+                    f += h[i] * *neg_vec.add(i);
+                }
+
+                let sigmoid_f = if f > 6.0 {
+                    1.0
+                } else if f < -6.0 {
+                    0.0
+                } else {
+                    1.0 / (1.0 + (-f).exp())
+                };
+
+                let g = (label - sigmoid_f) * alpha;
+
+                for i in 0..vector_size {
+                    neu1e[i] += g * *neg_vec.add(i);
+                    *neg_vec.add(i) += g * h[i];
+                }
+            }
+
+            // ── Step 5: Backprop to syn0 and syn_ng ──────────────────────────
+            // Scale: 1.0 / (1.0 + num_buckets) to normalise relative contributions
+            let scale = 1.0_f32 / (1.0 + center_bucket_ids.len() as f32);
+
+            // Update syn0
+            for i in 0..vector_size {
+                *center_vec.add(i) += neu1e[i] * scale;
+            }
+
+            // Update each n-gram bucket
+            for &bucket_id in center_bucket_ids {
+                let ng_offset = bucket_id as usize * vector_size;
+                if ng_offset + vector_size <= syn_ng_array_size {
+                    let ng_vec = syn_ng_ptr.add(ng_offset);
+                    for i in 0..vector_size {
+                        *ng_vec.add(i) += neu1e[i] * scale;
+                    }
+                }
+            }
         }
     }
 

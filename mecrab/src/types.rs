@@ -41,6 +41,13 @@ pub enum OutputFormat {
     /// word-initial morpheme is prefixed with ▁.  Suitable as input for BPE
     /// or SentencePiece tokenizer training.
     BpeCompatible,
+    /// Universal Dependencies CoNLL-U format.
+    ///
+    /// Produces tab-separated token lines with 10 fields including UPOS,
+    /// XPOS, LEMMA, and morphological features mapped from IPADIC.
+    /// HEAD and DEPREL are `_` (morphological analysis only, no dependency parsing).
+    /// Compatible with UD treebank tools and pipelines.
+    ConllU,
 }
 
 /// A single morpheme (token) in the analysis result
@@ -155,6 +162,7 @@ impl fmt::Display for AnalysisResult {
             OutputFormat::Ntriples => self.format_ntriples(f),
             OutputFormat::Nquads => self.format_nquads(f),
             OutputFormat::BpeCompatible => self.format_bpe_compatible(f),
+            OutputFormat::ConllU => self.format_conllu(f),
             // LatticeProb requires probability data — display falls back to JSON.
             // Use `MeCrab::parse_with_probs` + `api::format::format_lattice_prob` for
             // the full probabilistic output.
@@ -169,6 +177,27 @@ impl fmt::Display for AnalysisResult {
 // and called from the Display impl above.
 
 impl AnalysisResult {
+    /// Construct an `AnalysisResult` with a specific output format.
+    ///
+    /// This is the primary public constructor.  Pass the morphemes produced by
+    /// the Viterbi solver and the desired rendering format.
+    pub fn new(morphemes: Vec<Morpheme>, format: OutputFormat) -> Self {
+        Self { morphemes, format }
+    }
+
+    /// Format this result as a CoNLL-U (Universal Dependencies) string.
+    ///
+    /// Produces tab-separated 10-field lines with Universal POS tags, morphological
+    /// features, base forms (LEMMA), and heuristic dependency HEAD/DEPREL for Japanese.
+    /// Each sentence ends with a blank line. Compatible with UD treebank tools.
+    pub fn to_conllu(&self) -> String {
+        let formatted = Self {
+            morphemes: self.morphemes.clone(),
+            format: OutputFormat::ConllU,
+        };
+        format!("{formatted}")
+    }
+
     /// Return byte-offset spans for all non-EOS morphemes.
     ///
     /// Returns `(start_byte, end_byte)` pairs in order.

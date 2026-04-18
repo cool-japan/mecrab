@@ -36,6 +36,8 @@ enum ParseFormat {
     Wakati,
     /// MeCab-style dump with index, pos_id and wcost per token
     Dump,
+    /// CoNLL-U Universal Dependencies format
+    Conllu,
 }
 
 impl ParseFormat {
@@ -45,6 +47,7 @@ impl ParseFormat {
             "json" => Some(Self::Json),
             "wakati" => Some(Self::Wakati),
             "dump" => Some(Self::Dump),
+            "conllu" => Some(Self::Conllu),
             _ => None,
         }
     }
@@ -100,6 +103,8 @@ enum ParseResponseBody {
     Wakati { wakati: String, time_us: u64 },
     /// `format=dump` – MeCab-style dump string
     Dump { dump: String, time_us: u64 },
+    /// `format=conllu` – Universal Dependencies CoNLL-U text
+    Conllu { conllu: String, time_us: u64 },
 }
 
 /// Batch parse response
@@ -156,7 +161,7 @@ fn resolve_format(
         None => Ok(ParseFormat::default()),
         Some(s) => ParseFormat::from_str_opt(s).ok_or_else(|| {
             ApiError::BadRequest(format!(
-                "Unknown format '{}'. Valid values: json, wakati, dump",
+                "Unknown format '{}'. Valid values: json, wakati, dump, conllu",
                 s
             ))
         }),
@@ -196,6 +201,11 @@ fn build_tokens(result: &mecrab::AnalysisResult) -> Vec<TokenJson> {
             feature: m.feature.clone(),
         })
         .collect()
+}
+
+/// Build a CoNLL-U string from an [`AnalysisResult`].
+fn build_conllu_string(result: &mecrab::AnalysisResult) -> String {
+    result.to_conllu()
 }
 
 /// GET /health - Health check endpoint
@@ -245,6 +255,10 @@ async fn parse(
             dump: build_dump_string(&result),
             time_us,
         },
+        ParseFormat::Conllu => ParseResponseBody::Conllu {
+            conllu: build_conllu_string(&result),
+            time_us,
+        },
     };
 
     Ok(Json(body))
@@ -286,6 +300,7 @@ async fn parse_batch(
             }
             ParseFormat::Wakati => serde_json::Value::String(build_wakati_string(analysis)),
             ParseFormat::Dump => serde_json::Value::String(build_dump_string(analysis)),
+            ParseFormat::Conllu => serde_json::Value::String(build_conllu_string(analysis)),
         })
         .collect();
 

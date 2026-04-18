@@ -377,6 +377,45 @@ impl MeCrabWasm {
         format!("{}", result)
     }
 
+    /// Parse Japanese text and return analysis in CoNLL-U format (Universal Dependencies).
+    ///
+    /// Produces tab-separated 10-field lines with:
+    /// - FORM, LEMMA, UPOS (Universal POS), XPOS (IPADIC POS), FEATS (morphological)
+    /// - HEAD and DEPREL use rule-based Japanese dependency heuristics
+    /// - MISC: SpaceAfter=No (Japanese has no spaces between words)
+    ///
+    /// Returns an error string prefixed with "Error: " if parsing fails.
+    #[wasm_bindgen(js_name = "parseConllu")]
+    pub fn parse_conllu(&self, text: &str) -> String {
+        let dict = match self.inner.as_ref() {
+            Some(d) => d,
+            None => {
+                return "Error: Dictionary not loaded. Call loadDictionary() first.".to_string();
+            }
+        };
+
+        let lattice = match crate::lattice::Lattice::build(text, dict) {
+            Ok(l) => l,
+            Err(e) => return format!("Error: Lattice build error: {}", e),
+        };
+
+        let solver = crate::viterbi::ViterbiSolver::new(dict);
+        let path = match solver.solve(&lattice) {
+            Ok(p) => p,
+            Err(e) => return format!("Error: Viterbi error: {}", e),
+        };
+
+        let morphemes: Vec<crate::Morpheme> =
+            path.into_iter().map(format::node_to_morpheme).collect();
+
+        let result = crate::AnalysisResult {
+            morphemes,
+            format: crate::OutputFormat::ConllU,
+        };
+
+        format!("{}", result)
+    }
+
     /// Parse text and return JSON with marginal probabilities (forward-backward).
     ///
     /// JSON array of objects with:
@@ -1142,6 +1181,18 @@ mod tests {
         assert!(
             result.starts_with("Error:"),
             "parseToCsv without dict must return Error: string, got: {}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_parse_conllu_no_dict() {
+        let mecrab = MeCrabWasm::new();
+        let result = mecrab.parse_conllu("東京は日本の首都");
+        // Without a dictionary, must return an error string
+        assert!(
+            result.starts_with("Error:"),
+            "parse_conllu without dict must return Error: prefix, got: {}",
             result
         );
     }

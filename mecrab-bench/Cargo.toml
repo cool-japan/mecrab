@@ -46,3 +46,7 @@ harness = false
 [[bench]]
 name = "latticeprob"
 harness = false
+
+[[bench]]
+name = "formats"
+harness = false

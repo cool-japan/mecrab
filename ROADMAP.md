@@ -38,7 +38,7 @@ let min_cost = costs.reduce_min();
 - [x] Restructure ViterbiEntry for SIMD-friendly layout (SoA vs AoS)
 - [x] Batch connection cost lookups (8/16 at a time)
 - [x] Use `std::simd` for cost accumulation and min-finding
-- [ ] Benchmark: target 5x improvement on long sentences (SIMD benchmark implemented in `mecrab-bench/benches/simd.rs`; real numbers pending real IPADIC install)
+- [ ] Benchmark: target 5x improvement on long sentences (SIMD benchmark implemented in `mecrab-bench/benches/simd.rs`; real numbers require real IPADIC dictionary install — blocked)
 
 ### 1.2 Cache-Optimized Double-Array Trie
 
