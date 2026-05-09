@@ -39,3 +39,5 @@ tarpaulin-report.html
 
 # Rustc ICE dumps
 rustc-ice-*.txt
+
+target
