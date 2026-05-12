@@ -484,7 +484,7 @@ mod tests {
         let table = LatticeProbTable::default();
         assert!(table.by_position.is_empty());
         assert_eq!(table.input_len, 0);
-        assert_eq!(table.log_z, 0.0);
+        assert!(table.log_z.abs() < f64::EPSILON);
     }
 
     #[test]
@@ -526,7 +526,7 @@ mod tests {
     fn test_all_nodes_sorted() {
         let nm_a = NodeMarginal {
             surface: "a".to_string(),
-            feature: "".to_string(),
+            feature: String::new(),
             start: 0,
             end: 1,
             log_prob: -1.0_f64,
@@ -534,7 +534,7 @@ mod tests {
         };
         let nm_b = NodeMarginal {
             surface: "b".to_string(),
-            feature: "".to_string(),
+            feature: String::new(),
             start: 0,
             end: 1,
             log_prob: -0.1_f64,

@@ -709,7 +709,7 @@ mod tests {
                 },
                 Morpheme {
                     surface: "EOS".into(),
-                    feature: "".into(),
+                    feature: String::new(),
                     word_id: 0,
                     pos_id: 0,
                     wcost: 0,

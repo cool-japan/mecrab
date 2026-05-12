@@ -250,13 +250,12 @@ mod integration_tests {
 
         // Empty corpus should either succeed with empty vocab or return an error.
         // Either outcome is acceptable as long as it does not panic.
-        match result {
-            Ok(()) => assert!(
+        if let Ok(()) = result {
+            assert!(
                 vocab.is_empty(),
                 "empty corpus should produce empty vocabulary"
-            ),
-            Err(_) => {} // graceful error is also acceptable
-        }
+            );
+        } // graceful error is also acceptable
 
         let _ = std::fs::remove_file(&corpus_path);
     }
