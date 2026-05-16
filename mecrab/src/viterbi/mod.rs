@@ -1065,6 +1065,153 @@ mod tests {
         );
     }
 
+    /// Regression test for GitHub issue #1 (cool-japan/mecrab):
+    /// `kizame` (the tokeniser) silently dropped ない / ほど when they appeared
+    /// immediately before EOS.
+    ///
+    /// Root cause: the backward pass of the Viterbi algorithm selected its EOS
+    /// anchor by calling `.min_by_key(|e| e.cost)` over ALL entries in the last
+    /// lattice position, including ordinary word nodes.  If a word node (e.g.
+    /// "ない" with a negative `wcost`) had a lower accumulated cost than the
+    /// genuine EOS node, it was mistakenly chosen as the EOS anchor; backtracking
+    /// then started from that word's predecessor, silently dropping "ない" itself.
+    ///
+    /// The fix gates EOS selection behind an explicit predicate:
+    ///   `e.node.surface.is_empty() && e.node.start == text_len`
+    ///
+    /// This test constructs a synthetic final-position lattice slice that mimics
+    /// "食べたくない" (9 bytes of UTF-8) and "なるほど" (12 bytes), verifying
+    /// that under the fixed predicate the genuine EOS entry is selected even when
+    /// a co-located word node has a strictly lower accumulated cost.
+    #[test]
+    fn test_issue_1_final_token_before_eos() {
+        // ── "食べたくない" scenario ──────────────────────────────────────────
+        // "食べたくない" is 9 chars × 3 bytes each = 27 UTF-8 bytes.
+        // Simulate a lattice where the last node is "ない" (6 bytes) spanning
+        // positions 21..27, and an EOS node sits at start == 27.
+        {
+            let text_len: usize = 27; // byte length of "食べたくない"
+
+            let nai_node = LatticeNode {
+                surface: "ない",
+                start: 21,
+                end: text_len,
+                word_id: 42,
+                left_id: 20,
+                right_id: 20,
+                pos_id: 3,
+                wcost: -80, // negative wcost gives it a lower accumulated cost
+                feature: "助動詞,*,*,*,不変化型,基本形".to_string(),
+                is_unknown: false,
+            };
+            let eos_node = LatticeNode::eos(text_len);
+
+            // "ない" gets accumulated cost 50 (lower than EOS at 200).
+            // Old (buggy) logic would pick "ない" as the EOS anchor.
+            let entries: Vec<ViterbiEntry<'_>> = vec![
+                ViterbiEntry {
+                    node: &nai_node,
+                    cost: 50,
+                    prev: Some(0),
+                    pos: 0,
+                },
+                ViterbiEntry {
+                    node: &eos_node,
+                    cost: 200,
+                    prev: Some(0),
+                    pos: 1,
+                },
+            ];
+
+            // Old (buggy) selection — picks "ない" because cost 50 < 200.
+            let old_anchor = entries.iter().min_by_key(|e| e.cost).unwrap();
+            assert!(
+                !old_anchor.node.surface.is_empty(),
+                "Bug reproduced: old logic picks 'ない' as EOS anchor, \
+                 which would drop it from the output"
+            );
+
+            // Fixed selection — only considers genuine EOS nodes.
+            let fixed_anchor = entries
+                .iter()
+                .filter(|e| e.node.surface.is_empty() && e.node.start == text_len)
+                .min_by_key(|e| e.cost);
+
+            assert!(
+                fixed_anchor.is_some(),
+                "Fixed logic must find the EOS node for '食べたくない'"
+            );
+            let anchor = fixed_anchor.unwrap();
+            assert!(
+                anchor.node.surface.is_empty() && anchor.node.start == text_len,
+                "Fixed logic must select the genuine EOS node, \
+                 preserving 'ない' in the output path"
+            );
+        }
+
+        // ── "なるほど" scenario ──────────────────────────────────────────────
+        // "なるほど" is 4 chars × 3 bytes each = 12 UTF-8 bytes.
+        // Simulate a lattice where the last node is "ほど" (6 bytes) spanning
+        // positions 6..12, and an EOS node sits at start == 12.
+        {
+            let text_len: usize = 12; // byte length of "なるほど"
+
+            let hodo_node = LatticeNode {
+                surface: "ほど",
+                start: 6,
+                end: text_len,
+                word_id: 99,
+                left_id: 10,
+                right_id: 10,
+                pos_id: 5,
+                wcost: -50, // negative wcost → lower accumulated cost than EOS
+                feature: "助詞,副助詞".to_string(),
+                is_unknown: false,
+            };
+            let eos_node = LatticeNode::eos(text_len);
+
+            let entries: Vec<ViterbiEntry<'_>> = vec![
+                ViterbiEntry {
+                    node: &hodo_node,
+                    cost: 80,
+                    prev: Some(0),
+                    pos: 0,
+                },
+                ViterbiEntry {
+                    node: &eos_node,
+                    cost: 250,
+                    prev: Some(0),
+                    pos: 1,
+                },
+            ];
+
+            // Old (buggy) selection picks "ほど".
+            let old_anchor = entries.iter().min_by_key(|e| e.cost).unwrap();
+            assert!(
+                !old_anchor.node.surface.is_empty(),
+                "Bug reproduced: old logic picks 'ほど' as EOS anchor, \
+                 which would drop it from the output"
+            );
+
+            // Fixed selection.
+            let fixed_anchor = entries
+                .iter()
+                .filter(|e| e.node.surface.is_empty() && e.node.start == text_len)
+                .min_by_key(|e| e.cost);
+
+            assert!(
+                fixed_anchor.is_some(),
+                "Fixed logic must find the EOS node for 'なるほど'"
+            );
+            let anchor = fixed_anchor.unwrap();
+            assert!(
+                anchor.node.surface.is_empty() && anchor.node.start == text_len,
+                "Fixed logic must select the genuine EOS node, \
+                 preserving 'ほど' in the output path"
+            );
+        }
+    }
+
     // ── SoA correctness against toy lattice ─────────────────────────────────
 
     /// Verify that the SoA ViterbiTable forward scan produces the same minimum
