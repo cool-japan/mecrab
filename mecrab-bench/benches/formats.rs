@@ -34,7 +34,10 @@ fn make_morpheme(surface: &str, feature: &str, start: usize, end: usize) -> Morp
 fn make_result(morpheme_count: usize, format: OutputFormat) -> AnalysisResult {
     // Representative Japanese morphemes with realistic feature strings
     let templates: &[(&str, &str)] = &[
-        ("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ"),
+        (
+            "東京",
+            "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+        ),
         ("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ"),
         ("日本", "名詞,固有名詞,地域,一般,*,*,日本,ニホン,ニホン"),
         ("の", "助詞,連体化,*,*,*,*,の,ノ,ノ"),
@@ -48,7 +51,10 @@ fn make_result(morpheme_count: usize, format: OutputFormat) -> AnalysisResult {
         ("で", "助詞,接続助詞,*,*,*,*,で,デ,デ"),
         ("いる", "動詞,非自立,*,*,一段,基本形,いる,イル,イル"),
         ("街", "名詞,一般,*,*,*,*,街,マチ,マチ"),
-        ("美しい", "形容詞,自立,*,*,形容詞・アウオ段,基本形,美しい,ウツクシイ,ウツクシイ"),
+        (
+            "美しい",
+            "形容詞,自立,*,*,形容詞・アウオ段,基本形,美しい,ウツクシイ,ウツクシイ",
+        ),
     ];
 
     let mut morphemes = Vec::with_capacity(morpheme_count + 1);
@@ -63,7 +69,12 @@ fn make_result(morpheme_count: usize, format: OutputFormat) -> AnalysisResult {
     }
 
     // Always end with EOS
-    morphemes.push(make_morpheme("EOS", "BOS/EOS,*,*,*,*,*,*,*,*", byte_offset, byte_offset));
+    morphemes.push(make_morpheme(
+        "EOS",
+        "BOS/EOS,*,*,*,*,*,*,*,*",
+        byte_offset,
+        byte_offset,
+    ));
 
     AnalysisResult::new(morphemes, format)
 }
@@ -86,16 +97,12 @@ fn bench_format_render(c: &mut Criterion) {
 
         for (format_name, format) in formats {
             let result = make_result(n, *format);
-            group.bench_with_input(
-                BenchmarkId::new(*format_name, n),
-                &n,
-                |b, _| {
-                    b.iter(|| {
-                        let s = format!("{}", black_box(&result));
-                        black_box(s);
-                    })
-                },
-            );
+            group.bench_with_input(BenchmarkId::new(*format_name, n), &n, |b, _| {
+                b.iter(|| {
+                    let s = format!("{}", black_box(&result));
+                    black_box(s);
+                })
+            });
         }
     }
 

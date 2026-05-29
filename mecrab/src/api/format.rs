@@ -402,8 +402,12 @@ fn compute_heuristic_deps(
         // First try: rightmost 動詞
         // Then: rightmost 助動詞
         // Fallback: last non-punctuation token
-        let verb_pos = tokens.iter().rposition(|(_, pos, _)| pos.starts_with("動詞"));
-        let aux_pos = tokens.iter().rposition(|(_, pos, _)| pos.starts_with("助動詞"));
+        let verb_pos = tokens
+            .iter()
+            .rposition(|(_, pos, _)| pos.starts_with("動詞"));
+        let aux_pos = tokens
+            .iter()
+            .rposition(|(_, pos, _)| pos.starts_with("助動詞"));
         // prefer verb over aux; both over fallback
         verb_pos.or(aux_pos).unwrap_or_else(|| {
             tokens
@@ -814,10 +818,7 @@ mod tests {
     #[test]
     fn test_conllu_lemma_fallback() {
         // When base_form is "*", LEMMA should fall back to FORM.
-        let morphemes = vec![make_morpheme(
-            "テスト",
-            "名詞,一般,*,*,*,*,*,テスト,テスト",
-        )];
+        let morphemes = vec![make_morpheme("テスト", "名詞,一般,*,*,*,*,*,テスト,テスト")];
         let result = AnalysisResult {
             morphemes,
             format: OutputFormat::ConllU,
@@ -838,7 +839,10 @@ mod tests {
             format: OutputFormat::ConllU,
         };
         let output = format!("{result}");
-        assert!(output.is_empty(), "EOS-only result should produce empty output");
+        assert!(
+            output.is_empty(),
+            "EOS-only result should produce empty output"
+        );
     }
 
     #[test]
@@ -854,11 +858,7 @@ mod tests {
     #[test]
     fn test_heuristic_deps_root_detection() {
         // Simple case: last token is a verb (動詞) → root
-        let tokens = vec![
-            (1, "名詞", "*"),
-            (2, "助詞", "格助詞"),
-            (3, "動詞", "*"),
-        ];
+        let tokens = vec![(1, "名詞", "*"), (2, "助詞", "格助詞"), (3, "動詞", "*")];
         let deps = compute_heuristic_deps(&tokens);
         // token 3 (動詞) should be root
         assert_eq!(deps[2], (0, "root"), "動詞 should be root");

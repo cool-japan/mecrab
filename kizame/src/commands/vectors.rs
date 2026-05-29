@@ -423,8 +423,7 @@ fn run_vectors_train(
     eprintln!();
 
     // Load surface map if provided (word_id → surface for FastText subword training)
-    let mut surface_map: std::collections::HashMap<u32, String> =
-        std::collections::HashMap::new();
+    let mut surface_map: std::collections::HashMap<u32, String> = std::collections::HashMap::new();
     if let Some(map_path) = surface_map_path {
         eprintln!("  Surface map: {:?}", map_path);
         let file = std::fs::File::open(map_path)?;
@@ -467,11 +466,17 @@ fn run_vectors_train(
     // Apply subword configuration if requested
     let builder = match (subword_min_n, subword_max_n) {
         (Some(min_n), Some(max_n)) => {
-            eprintln!("  Subword: min_n={} max_n={} buckets={}", min_n, max_n, bucket_count);
+            eprintln!(
+                "  Subword: min_n={} max_n={} buckets={}",
+                min_n, max_n, bucket_count
+            );
             builder.with_subword(min_n, max_n, bucket_count)
         }
         (Some(min_n), None) => {
-            eprintln!("  Subword: min_n={} max_n=6 buckets={}", min_n, bucket_count);
+            eprintln!(
+                "  Subword: min_n={} max_n=6 buckets={}",
+                min_n, bucket_count
+            );
             builder.with_subword(min_n, 6, bucket_count)
         }
         _ => builder,

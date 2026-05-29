@@ -126,10 +126,7 @@ impl Word2Vec {
                 *val = (rng.random::<f32>() - 0.5) / vector_size as f32;
             }
             let mb = ng_size * 4 / 1024 / 1024;
-            eprintln!(
-                "Subword table: {} buckets ({} MB)",
-                sw.bucket_count, mb
-            );
+            eprintln!("Subword table: {} buckets ({} MB)", sw.bucket_count, mb);
             table
         } else {
             Vec::new()
@@ -175,8 +172,7 @@ impl Word2Vec {
 
     /// Train model from corpus file
     pub fn train_from_file<P: AsRef<Path>>(&mut self, corpus_path: P) -> Result<()> {
-        let mut trainer =
-            Trainer::new(corpus_path.as_ref(), self.vocab.clone(), &self.config);
+        let mut trainer = Trainer::new(corpus_path.as_ref(), self.vocab.clone(), &self.config);
 
         // Attach surface_map and extractor when subword is configured
         if let Some(ref sw) = self.config.subword.clone() {

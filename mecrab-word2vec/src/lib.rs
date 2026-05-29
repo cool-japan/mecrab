@@ -31,8 +31,8 @@
 
 mod io;
 mod model;
-pub mod subword;
 mod skipgram;
+pub mod subword;
 mod trainer;
 mod vocab;
 
@@ -346,7 +346,10 @@ mod integration_tests {
         let cfg = SubwordConfig::default();
         assert_eq!(cfg.min_n, 3, "default min_n must be 3");
         assert_eq!(cfg.max_n, 6, "default max_n must be 6");
-        assert_eq!(cfg.bucket_count, 2_000_000, "default bucket_count must be 2_000_000");
+        assert_eq!(
+            cfg.bucket_count, 2_000_000,
+            "default bucket_count must be 2_000_000"
+        );
     }
 
     #[test]
@@ -354,7 +357,10 @@ mod integration_tests {
         let ext = CharNgramExtractor::new(2, 3, 100);
         let ids = ext.extract_bucket_ids("東京");
         // Should have multiple n-gram bucket IDs, all < 100
-        assert!(!ids.is_empty(), "n-gram extraction must not be empty for non-trivial input");
+        assert!(
+            !ids.is_empty(),
+            "n-gram extraction must not be empty for non-trivial input"
+        );
         assert!(
             ids.iter().all(|&id| id < 100),
             "all bucket IDs must be in [0, bucket_count)"
@@ -412,7 +418,10 @@ mod integration_tests {
             "OOV embedding length must equal vector_size"
         );
         let any_non_zero = embedding.iter().any(|&v| v != 0.0);
-        assert!(any_non_zero, "OOV embedding must have at least one non-zero value after training");
+        assert!(
+            any_non_zero,
+            "OOV embedding must have at least one non-zero value after training"
+        );
 
         let _ = std::fs::remove_file(&corpus_path);
     }
@@ -471,7 +480,11 @@ mod integration_tests {
             "embed_word_with_subword must return Some for an in-vocab word"
         );
         let embedding = embedding.expect("already checked Some");
-        assert_eq!(embedding.len(), 8, "embedding length must equal vector_size");
+        assert_eq!(
+            embedding.len(),
+            8,
+            "embedding length must equal vector_size"
+        );
 
         let _ = std::fs::remove_file(&corpus_path);
     }
@@ -519,7 +532,9 @@ mod integration_tests {
             .map(|d| d.as_nanos())
             .unwrap_or(0);
         let subword_path = dir.join(format!("mecrab_subword_test_{nanos}.subword"));
-        model.save_subword_text(&subword_path).expect("save_subword_text");
+        model
+            .save_subword_text(&subword_path)
+            .expect("save_subword_text");
 
         // Load into a fresh model (no subword config set — simulate inference deployment)
         let mut model2 = Word2VecBuilder::new()
@@ -528,10 +543,14 @@ mod integration_tests {
             .build_from_corpus(&corpus)
             .expect("build_from_corpus for model2");
 
-        model2.load_subword_text(&subword_path).expect("load_subword_text");
+        model2
+            .load_subword_text(&subword_path)
+            .expect("load_subword_text");
 
         // Embedding after load should match
-        let after = model2.embed_surface("テスト").expect("should embed after load");
+        let after = model2
+            .embed_surface("テスト")
+            .expect("should embed after load");
 
         assert_eq!(before.len(), after.len(), "vector length must match");
         for (a, b) in before.iter().zip(after.iter()) {
@@ -565,7 +584,9 @@ mod integration_tests {
             .unwrap_or(0);
         let path = dir.join(format!("mecrab_subword_noop_{nanos}.subword"));
         // Should silently do nothing (no subword config set)
-        model.save_subword_text(&path).expect("should succeed silently");
+        model
+            .save_subword_text(&path)
+            .expect("should succeed silently");
         // File should NOT be created for a non-subword model
         // (or it might be created empty — either behavior is acceptable)
         // Just verify no panic and returns Ok

@@ -1,7 +1,7 @@
 //! File I/O for word2vec formats
 
-use crate::{Result, Word2VecError};
 use crate::vocab::Vocabulary;
+use crate::{Result, Word2VecError};
 use byteorder::{LittleEndian, WriteBytesExt};
 use std::fs::File;
 use std::io::{BufRead, BufReader, BufWriter, Write};
@@ -223,9 +223,7 @@ pub fn load_subword_sparse_text<P: AsRef<Path>>(
     // --- Parse first header line ---
     let header = lines
         .next()
-        .ok_or_else(|| {
-            Word2VecError::InvalidParameter("subword file is empty".to_string())
-        })??;
+        .ok_or_else(|| Word2VecError::InvalidParameter("subword file is empty".to_string()))??;
 
     let mut min_n: Option<usize> = None;
     let mut max_n: Option<usize> = None;
@@ -243,40 +241,29 @@ pub fn load_subword_sparse_text<P: AsRef<Path>>(
             })?);
         } else if let Some(val) = token.strip_prefix("bucket_count=") {
             bucket_count = Some(val.parse::<usize>().map_err(|_| {
-                Word2VecError::InvalidParameter(format!(
-                    "cannot parse bucket_count from '{token}'"
-                ))
+                Word2VecError::InvalidParameter(format!("cannot parse bucket_count from '{token}'"))
             })?);
         } else if let Some(val) = token.strip_prefix("vector_size=") {
             vector_size = Some(val.parse::<usize>().map_err(|_| {
-                Word2VecError::InvalidParameter(format!(
-                    "cannot parse vector_size from '{token}'"
-                ))
+                Word2VecError::InvalidParameter(format!("cannot parse vector_size from '{token}'"))
             })?);
         }
     }
 
-    let min_n = min_n.ok_or_else(|| {
-        Word2VecError::InvalidParameter("header missing min_n".to_string())
-    })?;
-    let max_n = max_n.ok_or_else(|| {
-        Word2VecError::InvalidParameter("header missing max_n".to_string())
-    })?;
+    let min_n =
+        min_n.ok_or_else(|| Word2VecError::InvalidParameter("header missing min_n".to_string()))?;
+    let max_n =
+        max_n.ok_or_else(|| Word2VecError::InvalidParameter("header missing max_n".to_string()))?;
     let bucket_count = bucket_count.ok_or_else(|| {
         Word2VecError::InvalidParameter("header missing bucket_count".to_string())
     })?;
-    let vector_size = vector_size.ok_or_else(|| {
-        Word2VecError::InvalidParameter("header missing vector_size".to_string())
-    })?;
+    let vector_size = vector_size
+        .ok_or_else(|| Word2VecError::InvalidParameter("header missing vector_size".to_string()))?;
 
     // --- Skip count comment line (informational only) ---
-    lines
-        .next()
-        .ok_or_else(|| {
-            Word2VecError::InvalidParameter(
-                "subword file missing count comment line".to_string(),
-            )
-        })??;
+    lines.next().ok_or_else(|| {
+        Word2VecError::InvalidParameter("subword file missing count comment line".to_string())
+    })??;
 
     // --- Allocate output table ---
     let total = bucket_count.checked_mul(vector_size).ok_or_else(|| {
@@ -299,14 +286,10 @@ pub fn load_subword_sparse_text<P: AsRef<Path>>(
         let bucket_id = fields
             .next()
             .ok_or_else(|| {
-                Word2VecError::InvalidParameter(
-                    "data line has no bucket_id field".to_string(),
-                )
+                Word2VecError::InvalidParameter("data line has no bucket_id field".to_string())
             })?
             .parse::<usize>()
-            .map_err(|e| {
-                Word2VecError::InvalidParameter(format!("cannot parse bucket_id: {e}"))
-            })?;
+            .map_err(|e| Word2VecError::InvalidParameter(format!("cannot parse bucket_id: {e}")))?;
 
         if bucket_id >= bucket_count {
             return Err(Word2VecError::InvalidParameter(format!(
@@ -325,9 +308,9 @@ pub fn load_subword_sparse_text<P: AsRef<Path>>(
 
         let mut count = 0usize;
         for (dst, field) in slot.iter_mut().zip(fields.by_ref()) {
-            *dst = field.parse::<f32>().map_err(|e| {
-                Word2VecError::InvalidParameter(format!("cannot parse float: {e}"))
-            })?;
+            *dst = field
+                .parse::<f32>()
+                .map_err(|e| Word2VecError::InvalidParameter(format!("cannot parse float: {e}")))?;
             count += 1;
         }
 
