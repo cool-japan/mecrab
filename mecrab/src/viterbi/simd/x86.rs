@@ -5,13 +5,22 @@
 
 // ── x86_64 AVX2/SSE4.1 find_min / find_best_predecessor ─────────────────────
 
+/// x86_64 AVX2/SSE4.1 implementations of `find_min` and `find_best_predecessor`.
+///
+/// Provides 8-way (AVX2) or 4-way (SSE4.1) i32 parallelism. Dispatched at
+/// compile time based on `target_feature`. Falls back to scalar on baseline
+/// `x86-64` targets where neither feature flag is set.
 #[cfg(target_arch = "x86_64")]
 pub mod x86_impl {
     // ── Internal helpers shared by both AVX2 and SSE4.1 paths ────────────────
 
     /// Scalar forward min scan returning (index, min_value).
     /// Used when the slice is too small for SIMD or as a remainder handler.
+    ///
+    /// Dead on the baseline `x86-64` target (no AVX2/SSE4.1) because the
+    /// SIMD fns that call it are stripped by `#[cfg(target_feature)]`.
     #[inline]
+    #[allow(dead_code)]
     fn scalar_min_forward(costs: &[i32]) -> (usize, i32) {
         debug_assert!(
             !costs.is_empty(),
@@ -29,7 +38,10 @@ pub mod x86_impl {
     }
 
     /// Return Some((index, min_value)) for a non-empty slice, None if empty.
+    ///
+    /// Dead on the baseline `x86-64` target; see `scalar_min_forward`.
     #[inline]
+    #[allow(dead_code)]
     fn scalar_min_from(costs: &[i32]) -> Option<(usize, i32)> {
         if costs.is_empty() {
             None
@@ -40,7 +52,10 @@ pub mod x86_impl {
 
     /// Scan `costs` linearly for the first element equal to `target`.
     /// Falls back to a full min scan on not-found (indicates logic error).
+    ///
+    /// Dead on the baseline `x86-64` target; see `scalar_min_forward`.
     #[inline]
+    #[allow(dead_code)]
     fn find_index_of(costs: &[i32], target: i32) -> (usize, i32) {
         for (i, &c) in costs.iter().enumerate() {
             if c == target {
@@ -421,6 +436,10 @@ pub mod x86_impl {
 
 // ── x86_64 AVX2/SSE4.1 gather+widen ─────────────────────────────────────────
 
+/// x86_64 AVX2/SSE4.1 gather+widen helper.
+///
+/// Gathers up to 16 connection costs (i16) by index and widens them to i32,
+/// using AVX2 8-lane or SSE4.1 4-lane intrinsics when available.
 #[cfg(target_arch = "x86_64")]
 pub mod x86_gather {
     /// Gather up to 16 connection costs from `row_data` at `right_ids[i]`,

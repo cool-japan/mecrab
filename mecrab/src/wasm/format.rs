@@ -6,13 +6,13 @@
 //! the string formats that JavaScript callers expect (JSON, CSV, wakati, etc.).
 //! None of the functions here are `#[wasm_bindgen]` exports.
 
-use crate::viterbi::ViterbiNode;
+use crate::viterbi::PathNode;
 
 // ── JSON helpers ─────────────────────────────────────────────────────────────
 
-/// Serialise a slice of [`ViterbiNode`]s into the `{"tokens":[...]}` JSON
+/// Serialise a slice of [`PathNode`]s into the `{"tokens":[...]}` JSON
 /// string returned by `MeCrabWasm::parse`.
-pub(super) fn format_json_output(path: &[ViterbiNode]) -> String {
+pub(super) fn format_json_output(path: &[PathNode]) -> String {
     let tokens: Vec<serde_json::Value> = path
         .iter()
         .map(|node| {
@@ -62,7 +62,7 @@ pub(super) fn format_features_list(features: &[&str]) -> String {
 ///
 /// EOS tokens are excluded.  Returns an empty string if `path` contains only
 /// EOS entries.
-pub(super) fn format_csv_output(path: Vec<ViterbiNode>) -> String {
+pub(super) fn format_csv_output(path: Vec<PathNode>) -> String {
     let lines: Vec<String> = path
         .into_iter()
         .filter(|node| node.surface != "EOS")
@@ -79,9 +79,9 @@ pub(super) fn format_csv_output(path: Vec<ViterbiNode>) -> String {
 
 // ── Shared Morpheme builder ───────────────────────────────────────────────────
 
-/// Convert a [`ViterbiNode`] into a [`crate::Morpheme`], setting optional
+/// Convert a [`PathNode`] into a [`crate::Morpheme`], setting optional
 /// fields to their default (empty / `None`) values.
-pub(super) fn node_to_morpheme(node: ViterbiNode) -> crate::Morpheme {
+pub(super) fn node_to_morpheme(node: PathNode) -> crate::Morpheme {
     crate::Morpheme {
         surface: node.surface,
         word_id: node.word_id,

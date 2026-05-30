@@ -6,6 +6,18 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **GPU-accelerated word2vec** (`--features gpu`): wgpu-backed skip-gram training with a hand-written WGSL compute shader; graceful CPU Hogwild! fallback when no adapter is found. `kizame vectors train --gpu` flag added. `TrainingConfig::use_gpu` field + `Word2VecBuilder::use_gpu()` API.
+- **Real NFKC normalization**: replaced hand-rolled "simplified NFKC-like" normalizer with the `unicode-normalization` crate (㌔→キロ, ①→1, combining marks, all NFC/NFD/NFKD forms).
+- **F16/I8 vector quantization**: `VectorStore::get_dequantized()` decodes half-precision and int8 vectors; `quantize_f16()` and `quantize_i8()` writers produce valid MCV1 binary files; `mean_pooling` now works for all data types.
+- **`MeCrab::from_dictionary` and `MeCrab::from_bytes`**: construct a fully functional analyzer from an in-memory `Dictionary` or four raw byte slices — no filesystem access required.
+- **Synthetic dictionary generator** (`mecrab-builder`): `build_synthetic_dictionary()` produces a complete, small-but-real Japanese MeCab dictionary (sys.dic + matrix.bin + char.bin + unk.dic) in memory, curated to correctly disambiguate the classic sentence "すもももももももものうち".
+- **First end-to-end pipeline test** (`mecrab-builder/tests/end_to_end.rs`): 7 integration tests covering full parse, wakati, feature carry-through, n-best, unknown-word handling, CoNLL-U format, and empty-input safety — all passing without a real IPADIC install.
+- `mecrab-builder`: `build_matrix_bytes`, `build_char_bytes`, `build_sysdic_bytes` / `build_unkdic_bytes` in-memory binary writers.
+- `kizame`: `--gpu` flag on `vectors train` (advisory when compiled without `--features gpu`).
+- Fixed: `vocab_size - 1` integer underflow in `mecrab-word2vec` on empty corpus.
+- Fixed: `ViterbiNode` → `PathNode` rename propagated to `wasm/format.rs`.
+- Fixed: `x86_impl` / `x86_gather` doc comments added; `scalar_min_forward` / `scalar_min_from` / `find_index_of` `#[allow(dead_code)]` on baseline x86-64 (only reachable from AVX2/SSE4.1 code paths).
+
 - Phase 3.2: `OutputFormat::LatticeProb` — JSON output with marginal probabilities from forward-backward algorithm (enables subword regularization for LLM pre-training)
 - Phase 3.2: `OutputFormat::BpeCompatible` — SentencePiece-style output with ▁ word-initial markers
 - `MeCrab::parse_with_probs()` — returns analysis result plus `LatticeProbTable` with per-morpheme marginal probabilities

@@ -143,6 +143,8 @@ pub struct VectorStore {
     vocab_size: usize,
     /// Data type of vectors
     data_type: VectorDataType,
+    /// Quantization scale (for I8 dtype; `reserved[0]` bits in header)
+    quant_scale: Option<f32>,
     /// Optional vocabulary index mapping word_id → surface form
     vocab: Option<VocabIndex>,
 }
@@ -217,12 +219,20 @@ impl VectorStore {
         // Get pointer to vector data
         let data_ptr = data[Self::HEADER_SIZE..].as_ptr();
 
+        // For I8 quantization, `reserved[0]` stores the scale as an f32 bit pattern.
+        let quant_scale = if data_type == VectorDataType::I8 && header.reserved[0] != 0 {
+            Some(f32::from_bits(header.reserved[0]))
+        } else {
+            None
+        };
+
         Ok(Self {
             _mmap: mmap,
             data_ptr,
             dim,
             vocab_size,
             data_type,
+            quant_scale,
             vocab: None,
         })
     }
@@ -273,6 +283,42 @@ impl VectorStore {
         }
     }
 
+    /// Get a dequantized f32 vector for any supported data type.
+    ///
+    /// - **F32**: Returns a borrowed slice (zero-copy) wrapped in [`std::borrow::Cow::Borrowed`].
+    /// - **F16**: Decodes each element from IEEE-754 half-precision to f32 (allocates).
+    /// - **I8**: Linearly dequantizes `i8 * scale → f32` using the per-store scale (allocates).
+    pub fn get_dequantized(&self, word_id: u32) -> Option<std::borrow::Cow<'_, [f32]>> {
+        let idx = word_id as usize;
+        if idx >= self.vocab_size {
+            return None;
+        }
+        match self.data_type {
+            VectorDataType::F32 => self.get(word_id).map(std::borrow::Cow::Borrowed),
+            VectorDataType::F16 => {
+                let start = idx * self.dim * 2;
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(self.data_ptr.add(start), self.dim * 2)
+                };
+                let u16s: &[u16] = bytemuck::cast_slice(bytes);
+                Some(std::borrow::Cow::Owned(
+                    u16s.iter().map(|&b| f16_to_f32(b)).collect(),
+                ))
+            }
+            VectorDataType::I8 => {
+                let start = idx * self.dim;
+                let bytes = unsafe {
+                    std::slice::from_raw_parts(self.data_ptr.add(start), self.dim)
+                };
+                let i8s: &[i8] = bytemuck::cast_slice(bytes);
+                let scale = self.quant_scale.unwrap_or(1.0_f32);
+                Some(std::borrow::Cow::Owned(
+                    i8s.iter().map(|&b| b as f32 * scale).collect(),
+                ))
+            }
+        }
+    }
+
     /// Get vector dimensionality
     #[inline]
     pub const fn dim(&self) -> usize {
@@ -308,9 +354,9 @@ impl VectorStore {
         let mut count = 0;
 
         for &word_id in word_ids {
-            if let Some(vec) = self.get(word_id) {
-                for (i, &val) in vec.iter().enumerate() {
-                    sum[i] += val;
+            if let Some(vec) = self.get_dequantized(word_id) {
+                for (s, &val) in sum.iter_mut().zip(vec.iter()) {
+                    *s += val;
                 }
                 count += 1;
             }
@@ -454,6 +500,109 @@ impl VectorStore {
 
         Some(dot / denom)
     }
+}
+
+// ── F16 ↔ F32 converters (manual IEEE-754, no extra crate) ───────────────────
+
+/// Decode a 16-bit IEEE-754 half-precision bit pattern to f32.
+fn f16_to_f32(bits: u16) -> f32 {
+    let sign = (bits >> 15) as u32;
+    let exp = ((bits >> 10) & 0x1F) as u32;
+    let mant = (bits & 0x3FF) as u32;
+    let bits32: u32 = if exp == 0 {
+        if mant == 0 {
+            sign << 31 // ±zero
+        } else {
+            // subnormal: normalise
+            let e = mant.leading_zeros() - 22;
+            (sign << 31) | ((127 - 14 - e) << 23) | ((mant << (e + 1)) & 0x7F_FFFF)
+        }
+    } else if exp == 31 {
+        (sign << 31) | 0x7F80_0000 | (mant << 13) // ±inf / NaN
+    } else {
+        (sign << 31) | ((exp + 127 - 15) << 23) | (mant << 13)
+    };
+    f32::from_bits(bits32)
+}
+
+/// Encode an f32 to a 16-bit IEEE-754 half-precision bit pattern (with saturation).
+fn f32_to_f16(val: f32) -> u16 {
+    let bits = val.to_bits();
+    let sign = ((bits >> 31) & 1) as u16;
+    let exp = ((bits >> 23) & 0xFF) as i32;
+    let mant = bits & 0x7F_FFFF;
+    if exp == 0xFF {
+        return (sign << 15) | 0x7C00 | u16::from(mant != 0); // inf/NaN
+    }
+    let exp16 = exp - 127 + 15;
+    if exp16 >= 31 {
+        return (sign << 15) | 0x7C00; // overflow → infinity
+    }
+    if exp16 <= 0 {
+        if exp16 < -10 {
+            return sign << 15; // underflow → zero
+        }
+        let m = (mant | 0x80_0000) >> (1 - exp16);
+        return (sign << 15) | (m >> 13) as u16;
+    }
+    (sign << 15) | ((exp16 as u16) << 10) | (mant >> 13) as u16
+}
+
+// ── Quantization writers (emit full MCV1-format byte buffers) ────────────────
+
+/// Build a complete MCV1 binary buffer with F16-quantized vectors.
+///
+/// Encodes each f32 element to an IEEE-754 half-precision u16.
+/// Suitable for passing to [`VectorStore::from_mmap`] after writing to a file.
+pub fn quantize_f16(vectors: &[f32], vocab_size: usize, dim: usize) -> Vec<u8> {
+    use bytemuck::bytes_of;
+    assert_eq!(vectors.len(), vocab_size * dim, "vectors length mismatch");
+    let data_bytes = vocab_size * dim * 2; // 2 bytes per f16
+    let total = 32 + data_bytes;
+    let mut buf = Vec::with_capacity(total);
+    let header = VectorHeader {
+        magic: MAGIC,
+        vocab_size: vocab_size as u32,
+        dim: dim as u32,
+        data_type: VectorDataType::F16 as u32,
+        reserved: [0u32; 4],
+    };
+    buf.extend_from_slice(bytes_of(&header));
+    for &v in vectors {
+        let half = f32_to_f16(v);
+        buf.extend_from_slice(&half.to_le_bytes());
+    }
+    buf
+}
+
+/// Build a complete MCV1 binary buffer with I8-quantized vectors.
+///
+/// Uses per-store linear quantization: `scale = max_abs / 127.0`.
+/// Returns `(bytes, scale)` — store `scale` or persist it via the header's
+/// `reserved[0]` field (already encoded as `f32::to_bits(scale)`).
+pub fn quantize_i8(vectors: &[f32], vocab_size: usize, dim: usize) -> (Vec<u8>, f32) {
+    use bytemuck::bytes_of;
+    assert_eq!(vectors.len(), vocab_size * dim, "vectors length mismatch");
+    let max_abs = vectors.iter().copied().fold(0.0_f32, |m, v| m.max(v.abs()));
+    let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0_f32 };
+    let inv = 1.0 / scale;
+    let total = 32 + vocab_size * dim;
+    let mut buf = Vec::with_capacity(total);
+    let mut reserved = [0u32; 4];
+    reserved[0] = scale.to_bits(); // persist scale in reserved[0]
+    let header = VectorHeader {
+        magic: MAGIC,
+        vocab_size: vocab_size as u32,
+        dim: dim as u32,
+        data_type: VectorDataType::I8 as u32,
+        reserved,
+    };
+    buf.extend_from_slice(bytes_of(&header));
+    for &v in vectors {
+        let q = (v * inv).round().clamp(-128.0, 127.0) as i8;
+        buf.push(q as u8);
+    }
+    (buf, scale)
 }
 
 #[cfg(test)]

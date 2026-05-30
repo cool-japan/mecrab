@@ -23,6 +23,7 @@ impl FeatureTable {
     /// # Errors
     ///
     /// Returns an error if the data is corrupted.
+    #[allow(dead_code)]
     pub fn from_bytes(data: &[u8]) -> Result<Self> {
         // The feature section starts after the trie data
         // For now, we'll extract what we can from the dictionary

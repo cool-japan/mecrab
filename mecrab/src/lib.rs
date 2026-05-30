@@ -141,6 +141,54 @@ impl MeCrab {
         MeCrabBuilder::new()
     }
 
+    /// Construct directly from an already-built [`Dictionary`] (no filesystem access).
+    ///
+    /// The dictionary provider is auto-detected from the feature field count, mirroring
+    /// the logic in [`MeCrabBuilder::build`].  Use this to build a [`MeCrab`] from a
+    /// [`crate::dict::Dictionary`] constructed in memory (e.g. from a synthetic dict in
+    /// tests, or from a WASM packed blob).
+    ///
+    /// [`Dictionary`]: crate::dict::Dictionary
+    #[must_use]
+    pub fn from_dictionary(dictionary: Dictionary) -> Self {
+        use dict::provider::{AutoDetectProvider, IpadicProvider};
+        let provider: Arc<dyn DictionaryProvider> =
+            if let Some(n) = dictionary.sample_feature_count() {
+                Arc::new(AutoDetectProvider::detect(n))
+            } else {
+                Arc::new(IpadicProvider)
+            };
+        Self {
+            dictionary: Arc::new(dictionary),
+            output_format: OutputFormat::default(),
+            semantic_enabled: false,
+            ipa_enabled: false,
+            vector_enabled: false,
+            vector_store: None,
+            provider,
+        }
+    }
+
+    /// Construct from the four raw dictionary byte slices.
+    ///
+    /// This is a convenience wrapper around [`Dictionary::from_bytes`] +
+    /// [`MeCrab::from_dictionary`].  Useful for tests, WASM, and in-process
+    /// benchmarks that want to avoid filesystem access.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if any dictionary component is malformed.
+    pub fn from_bytes(
+        sys_dic: &[u8],
+        matrix: &[u8],
+        char_def: &[u8],
+        unk_def: &[u8],
+    ) -> Result<Self> {
+        Ok(Self::from_dictionary(Dictionary::from_bytes(
+            sys_dic, matrix, char_def, unk_def,
+        )?))
+    }
+
     /// Replace the `DictionaryProvider` used for structured feature parsing.
     ///
     /// Returns a new `MeCrab` that shares all other state with `self` but uses

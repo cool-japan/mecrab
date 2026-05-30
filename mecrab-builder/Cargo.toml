@@ -13,9 +13,9 @@ categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 # Core library (for Token, SemanticEntry definitions)
-mecrab = { version = "0.2.0", path = "../mecrab" }
+mecrab = { path = "../mecrab" }
 
-# Binary serialization (LE integers for sys.dic output)
+# Binary serialization (LE integers for sys.dic, matrix.bin, char.bin output)
 byteorder.workspace = true
 
 # Async runtime
@@ -43,11 +43,11 @@ indicatif.workspace = true
 # Parallel processing
 rayon.workspace = true
 
+# URL encoding (for Wikidata API queries)
+urlencoding.workspace = true
+
 # Error handling
 thiserror.workspace = true
-
-# URL encoding (for entity resolver)
-urlencoding.workspace = true
 
 [lib]
 name = "mecrab_builder"

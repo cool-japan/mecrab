@@ -39,6 +39,12 @@ const HEADER_SIZE: usize = 72;
 // Sentinel meaning "this slot is not yet allocated"
 const FREE_CHECK: u32 = u32::MAX;
 
+// Sentinel meaning "this slot is reserved as a base slot by a non-terminal node".
+// The reader checks `units[b].check == b as u32` for terminals; CLAIMED uses a
+// different pattern (u32::MAX - 1) that cannot match any real base, ensuring
+// `find_base` skips it while the reader ignores it (check != b).
+const CLAIMED_BASE: u32 = u32::MAX - 1;
+
 // ── Public input type ────────────────────────────────────────────
 
 /// A single dictionary entry to include in the sys.dic
@@ -189,23 +195,34 @@ impl DaBuilder {
 
     #[inline]
     fn is_free(&self, idx: usize) -> bool {
-        idx >= self.units.len() || self.units[idx].check == FREE_CHECK
+        if idx >= self.units.len() {
+            return true; // unallocated slots are always free
+        }
+        // FREE_CHECK = not yet allocated.  CLAIMED_BASE = reserved as a base slot.
+        // Both sentinels mean the slot is "unoccupied by a real child/terminal".
+        // CLAIMED_BASE must still be considered NOT free by find_base (slot b is taken).
+        self.units[idx].check == FREE_CHECK
     }
 
     /// Find a BASE value `b` such that:
+    ///   - Slot `b` itself is free (so no other node claims it as their base)
     ///   - For every child byte `c` in `child_bytes`:  slot `b + c + 1` is free
-    ///   - For terminal:                               slot `b`          is free
+    ///   - For terminal:                               slot `b` is free (same requirement)
     ///
-    /// `need_terminal` is true when this node is also a terminal (needs a
-    /// self-referential value slot at `b`).
-    fn find_base(&self, child_bytes: &[u8], need_terminal: bool) -> usize {
-        // We want the smallest b >= 1 such that all required slots are free.
-        // Required child slots: b + c + 1  for each c in child_bytes
-        // Required terminal slot (if need_terminal): b  itself
+    /// We ALWAYS require that slot `b` itself is free, even for non-terminal nodes.
+    /// This prevents two different states from sharing the same `b` value (which
+    /// would cause false-terminal matches when the terminal-check reads `units[b]`).
+    fn find_base(&self, child_bytes: &[u8], _need_terminal: bool) -> usize {
+        // We want the smallest b >= 1 such that:
+        //   1. units[b] is free (not yet claimed by any node as their terminal slot
+        //      or as their "self" slot) — ensures base uniqueness
+        //   2. For each child byte c: slot b + c + 1 is free
         let mut b: usize = 1;
         'outer: loop {
-            // Terminal self-reference: units[b].check must be free
-            if need_terminal && !self.is_free(b) {
+            // Always require that slot b itself is free, regardless of need_terminal.
+            // This guarantees that no two nodes share the same base value, preventing
+            // false terminal detections when common_prefix_search checks units[b].check == b.
+            if !self.is_free(b) {
                 b += 1;
                 continue 'outer;
             }
@@ -256,15 +273,20 @@ impl DaBuilder {
             self.ensure_capacity(da_slot);
             self.units[da_slot].base = base as i32;
 
-            // If terminal: place a self-referential value slot at `base`.
-            // units[base].check = base  (self-reference)
-            // units[base].base  = -value - 1  (leaf encoding)
+            // Claim slot `base` unconditionally.
+            // For terminal nodes: use the real self-referential sentinel (check = base).
+            // For non-terminal nodes: use CLAIMED_BASE to prevent find_base from
+            // assigning the same `base` to another node, which would cause false
+            // terminal matches during common_prefix_search.
+            self.ensure_capacity(base);
             if need_terminal {
-                self.ensure_capacity(base);
-                // Mark slot `base` as claimed by the value-slot convention.
-                // check = base  (so reader: units[base].check == b as u32  where b == base)
+                // Mark slot `base` as a terminal: check == base, base == -value - 1.
                 self.units[base].check = base as u32;
                 self.units[base].base = -node.value - 1;
+            } else {
+                // Mark slot `base` as reserved (non-terminal base).
+                // The reader will never see check == b here because CLAIMED_BASE ≠ base.
+                self.units[base].check = CLAIMED_BASE;
             }
 
             // Place child transition slots: units[base + c + 1]
@@ -284,14 +306,19 @@ impl DaBuilder {
     }
 
     fn finish(mut self) -> Vec<DaUnit> {
-        // Trim trailing free slots
-        while self.units.last().is_some_and(|u| u.check == FREE_CHECK) {
+        // Trim trailing free/claimed slots (neither can appear in a valid result)
+        while self
+            .units
+            .last()
+            .is_some_and(|u| u.check == FREE_CHECK || u.check == CLAIMED_BASE)
+        {
             self.units.pop();
         }
-        // Replace remaining FREE_CHECK sentinels with u32::MAX for the file
-        // (invalid check values that will never match)
+        // Replace construction sentinels with u32::MAX for the file.
+        // u32::MAX can never equal any real base index (indices are small positive numbers),
+        // so the reader will never mistake these for valid transitions.
         for unit in &mut self.units {
-            if unit.check == FREE_CHECK {
+            if unit.check == FREE_CHECK || unit.check == CLAIMED_BASE {
                 unit.check = u32::MAX;
             }
         }
@@ -299,27 +326,29 @@ impl DaBuilder {
     }
 }
 
-// ── Main writer ──────────────────────────────────────────────────
+// ── Core byte-building function ──────────────────────────────────
 
-/// Write a MeCab-compatible sys.dic binary file.
+/// Build a MeCab-compatible sys.dic (or unk.dic) as an in-memory byte buffer.
+///
+/// This is the core routine shared by both `write_sysdic` and `build_unkdic_bytes`.
 ///
 /// # Arguments
 /// * `entries`     - Dictionary entries (sorted by surface internally)
 /// * `left_size`   - Number of left context IDs (from connection matrix)
 /// * `right_size`  - Number of right context IDs
 /// * `charset`     - Character set string (e.g., `"UTF-8"`)
-/// * `output`      - Output file path
+/// * `dict_type`   - Dictionary type: 0 = sys.dic, 2 = unk.dic
 ///
 /// # Errors
 ///
 /// Returns [`BuildError`] on I/O or serialization failure.
-pub fn write_sysdic(
+pub fn build_sysdic_bytes(
     entries: &[DicEntry],
     left_size: u32,
     right_size: u32,
     charset: &str,
-    output: &Path,
-) -> Result<WriteSysDicStats> {
+    dict_type: u32,
+) -> Result<(Vec<u8>, WriteSysDicStats)> {
     // ── Group entries by surface (BTreeMap → sorted order) ──────
     let mut by_surface: std::collections::BTreeMap<Vec<u8>, Vec<&DicEntry>> =
         std::collections::BTreeMap::new();
@@ -394,7 +423,7 @@ pub fn write_sysdic(
     // Header (10 × u32 = 40 bytes)
     buf.write_u32::<LittleEndian>(magic)?;
     buf.write_u32::<LittleEndian>(DIC_VERSION)?;
-    buf.write_u32::<LittleEndian>(0)?; // dict_type = sys
+    buf.write_u32::<LittleEndian>(dict_type)?; // parameterized dict_type
     buf.write_u32::<LittleEndian>(lexicon_size)?;
     buf.write_u32::<LittleEndian>(left_size)?;
     buf.write_u32::<LittleEndian>(right_size)?;
@@ -429,16 +458,58 @@ pub fn write_sysdic(
     // Feature section
     buf.extend_from_slice(&feature_bytes);
 
-    // Write to file
-    std::fs::write(output, &buf)?;
-
-    Ok(WriteSysDicStats {
+    let stats = WriteSysDicStats {
         lexicon_size,
         token_count: tokens.len(),
         da_units: da_units.len(),
         feature_bytes: feature_size,
         file_size: total_size,
-    })
+    };
+
+    Ok((buf, stats))
+}
+
+/// Build a MeCab-compatible unk.dic as an in-memory byte buffer.
+///
+/// This is a thin wrapper around [`build_sysdic_bytes`] that forces `dict_type = 2`
+/// (MECAB_UNK_DIC), as required by the `UnknownDictionary` reader.
+///
+/// # Errors
+///
+/// Returns [`BuildError`] on I/O or serialization failure.
+pub fn build_unkdic_bytes(
+    entries: &[DicEntry],
+    left_size: u32,
+    right_size: u32,
+    charset: &str,
+) -> Result<(Vec<u8>, WriteSysDicStats)> {
+    build_sysdic_bytes(entries, left_size, right_size, charset, 2)
+}
+
+// ── Main writer ──────────────────────────────────────────────────
+
+/// Write a MeCab-compatible sys.dic binary file.
+///
+/// # Arguments
+/// * `entries`     - Dictionary entries (sorted by surface internally)
+/// * `left_size`   - Number of left context IDs (from connection matrix)
+/// * `right_size`  - Number of right context IDs
+/// * `charset`     - Character set string (e.g., `"UTF-8"`)
+/// * `output`      - Output file path
+///
+/// # Errors
+///
+/// Returns [`BuildError`] on I/O or serialization failure.
+pub fn write_sysdic(
+    entries: &[DicEntry],
+    left_size: u32,
+    right_size: u32,
+    charset: &str,
+    output: &Path,
+) -> Result<WriteSysDicStats> {
+    let (buf, stats) = build_sysdic_bytes(entries, left_size, right_size, charset, 0)?;
+    std::fs::write(output, &buf)?;
+    Ok(stats)
 }
 
 // ── Tests ────────────────────────────────────────────────────────

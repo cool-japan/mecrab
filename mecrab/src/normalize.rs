@@ -7,6 +7,8 @@
 #![allow(clippy::items_after_statements)]
 #![allow(clippy::cast_precision_loss)]
 
+use unicode_normalization::UnicodeNormalization;
+
 /// Unicode normalization form
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum NormForm {
@@ -111,9 +113,9 @@ impl Normalizer {
     pub fn normalize(&self, text: &str) -> String {
         let mut result = text.to_string();
 
-        // Apply Unicode normalization first (simplified, not full NFKC)
+        // Apply Unicode normalization using the real unicode-normalization crate
         if self.form != NormForm::None {
-            result = Self::apply_unicode_normalization(&result);
+            result = Self::apply_unicode_normalization(&result, self.form);
         }
 
         // Width conversions
@@ -143,28 +145,22 @@ impl Normalizer {
         result
     }
 
-    /// Apply Unicode normalization (simplified version)
-    fn apply_unicode_normalization(text: &str) -> String {
-        let mut result = String::with_capacity(text.len());
-
-        for c in text.chars() {
-            // Simplified NFKC-like normalization
-            match c {
-                // Full-width variants of ASCII
-                '\u{FF01}'..='\u{FF5E}' => {
-                    let ascii = ((c as u32) - 0xFF01 + 0x21) as u8 as char;
-                    result.push(ascii);
-                }
-                // Ideographic space to regular space
-                '\u{3000}' => result.push(' '),
-                // Wave dash to full-width tilde
-                '\u{301C}' => result.push('\u{FF5E}'),
-                // Other characters pass through
-                _ => result.push(c),
-            }
+    /// Apply Unicode normalization using the real unicode-normalization crate.
+    ///
+    /// NFKC handles the full Unicode compatibility decomposition table, including:
+    /// - Full-width ASCII variants (Ａ→A, １→1)
+    /// - Ideographic space (U+3000 → U+0020)
+    /// - Circled numbers (①→1)
+    /// - Square unit symbols (㌔→キロメートル)
+    /// - Combining marks / precomposed forms
+    fn apply_unicode_normalization(text: &str, form: NormForm) -> String {
+        match form {
+            NormForm::Nfkc => text.nfkc().collect(),
+            NormForm::Nfc => text.nfc().collect(),
+            NormForm::Nfkd => text.nfkd().collect(),
+            NormForm::Nfd => text.nfd().collect(),
+            NormForm::None => text.to_string(),
         }
-
-        result
     }
 
     /// Convert character widths
@@ -670,5 +666,97 @@ mod tests {
         let norm = Normalizer::new();
         let result = norm.normalize("テスト\u{3000}テスト");
         assert_eq!(result, "テスト テスト");
+    }
+
+    // --- WS3: Real NFKC tests ---
+
+    #[test]
+    fn nfkc_circled_numbers() {
+        // ① U+2460 NFKC-decomposes to "1" (DIGIT ONE)
+        // ② U+2461 → "2", ③ U+2462 → "3"
+        let n = Normalizer::new();
+        assert_eq!(n.normalize("①②③"), "123");
+    }
+
+    #[test]
+    fn nfkc_unit_symbols() {
+        // U+3314 SQUARE KIRO: NFKC → "キロ" (2 katakana chars キ + ロ)
+        // U+3316 SQUARE KIROMEETORU: NFKC → "キロメートル" (6 katakana chars)
+        let n = Normalizer::new();
+        assert_eq!(n.normalize("\u{3314}"), "キロ");
+        assert_eq!(n.normalize("\u{3316}"), "キロメートル");
+    }
+
+    #[test]
+    fn nfkc_fullwidth_ascii() {
+        // Full-width uppercase Latin letters NFKC-decompose to ASCII
+        let n = Normalizer::new();
+        assert_eq!(n.normalize("ＡＢＣ"), "ABC");
+    }
+
+    #[test]
+    fn nfkc_ideographic_space_explicit() {
+        // U+3000 IDEOGRAPHIC SPACE → U+0020 SPACE via NFKC
+        // then collapse_whitespace keeps a single space
+        let n = Normalizer::new();
+        assert_eq!(n.normalize("東京\u{3000}大阪"), "東京 大阪");
+    }
+
+    #[test]
+    fn nfkc_combining_marks() {
+        // NFD: e + U+0301 COMBINING ACUTE ACCENT (2 code points)
+        // NFKC collapses to U+00E9 é (1 code point)
+        let n = Normalizer::new();
+        let decomposed = "e\u{0301}"; // e + combining acute accent
+        let composed = n.normalize(decomposed);
+        assert_eq!(
+            composed.chars().count(),
+            1,
+            "should be precomposed é: {:?}",
+            composed
+        );
+        assert_eq!(composed, "\u{00E9}");
+    }
+
+    #[test]
+    fn nfkc_form_nfc_composes() {
+        // NFC also composes canonical decompositions
+        let n = Normalizer::new().with_form(NormForm::Nfc);
+        let decomposed = "e\u{0301}";
+        let composed = n.normalize(decomposed);
+        assert_eq!(composed.chars().count(), 1);
+        assert_eq!(composed, "\u{00E9}");
+    }
+
+    #[test]
+    fn nfkc_form_nfkd_decomposes() {
+        // NFKD should decompose precomposed é → e + combining accent (2 code points)
+        // collapse_whitespace and remove_zero_width don't affect combining marks
+        let n_nfkd = Normalizer::new().with_form(NormForm::Nfkd);
+        let precomposed = "\u{00E9}"; // é precomposed
+        let decomposed_out = n_nfkd.normalize(precomposed);
+        // NFKD: U+00E9 → U+0065 U+0301 = 2 code points
+        assert_eq!(
+            decomposed_out.chars().count(),
+            2,
+            "NFKD output: {:?}",
+            decomposed_out
+        );
+    }
+
+    #[test]
+    fn nfkc_fullwidth_digits_still_work() {
+        // Full-width digits: NFKC handles ０→0, then convert_widths is idempotent
+        let n = Normalizer::new();
+        assert_eq!(n.normalize("０１２３４５６７８９"), "0123456789");
+    }
+
+    #[test]
+    fn nfkc_halfwidth_katakana_fullwidth() {
+        // Half-width katakana ｱ (U+FF71) — NFKC converts to ア (U+30A2)
+        // The subsequent convert_widths with fullwidth_katakana=true is a no-op (already full-width)
+        let n = Normalizer::new();
+        let result = n.normalize("\u{FF71}"); // ｱ halfwidth katakana A
+        assert_eq!(result, "\u{30A2}"); // ア full-width katakana A
     }
 }

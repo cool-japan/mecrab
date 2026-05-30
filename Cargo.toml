@@ -51,6 +51,14 @@ pyo3 = { version = "0.28", features = ["extension-module", "multiple-pymethods"]
 # URL encoding
 urlencoding = "2"
 
+# Unicode normalization (real NFKC via unicode-normalization crate)
+unicode-normalization = "0.1"
+
+# GPU compute (wgpu-based; optional, behind `gpu` feature in mecrab-word2vec)
+wgpu = "29.0"
+pollster = "0.4"
+bytemuck = { version = "1.25", features = ["derive"] }
+
 # Dev dependencies
 criterion = { version = "0.8", features = ["html_reports"] }
 # Note: criterion 0.5 is pinned for compatibility; 0.8 requires migration

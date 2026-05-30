@@ -56,7 +56,7 @@ pub fn save_word2vec_text<P: AsRef<Path>>(
 /// Save embeddings in MCV1 binary format
 ///
 /// MCV1 Format:
-/// ```
+/// ```text
 /// Header (32 bytes):
 ///   [0-3]   Magic: 0x3143564D ("MCV1")
 ///   [4-7]   vocab_size: u32

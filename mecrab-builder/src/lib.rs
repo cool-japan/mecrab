@@ -2,33 +2,33 @@
 //!
 //! Copyright 2026 COOLJAPAN OU (Team KitaSan)
 //!
-//! This crate provides the data pipeline for building semantic-enriched
-//! dictionaries from Wikidata/Wikipedia dumps. It implements ED-005.
-//!
-//! ## Architecture
-//!
-//! ```text
-//! Wikidata JSON Dump ──┐
-//!                      ├──▶ Surface → URI Index ──▶ Merge with Dictionary CSV
-//! Wikipedia Abstracts ─┘                                      │
-//!                                                             ▼
-//!                                                    Extended Dictionary
-//!                                                    (with semantic URIs)
-//! ```
+//! This crate provides:
+//! - The data pipeline for building semantic-enriched dictionaries from
+//!   Wikidata/Wikipedia dumps (Wikidata processor)
+//! - Binary format writers for sys.dic, unk.dic, matrix.bin, and char.bin
+//! - A synthetic in-memory dictionary for testing and WASM use cases
 
+pub mod char_writer;
+pub mod matrix_writer;
+pub mod ontology;
+pub mod synthetic;
+pub mod sysdic_writer;
 mod csv_export;
 mod dbpedia;
 mod entity_resolver;
-pub mod ontology;
-pub mod sysdic_writer;
 mod wikidata;
 mod wikipedia;
 
+pub use char_writer::{build_char_bytes, pack_char_info, CharRange, CHARINFO_TABLE_SIZE};
 pub use csv_export::{CsvExportConfig, CsvExportStats, export_csv_with_uris, export_index_as_csv};
 pub use dbpedia::{DBpediaProcessor, DBpediaStats};
 pub use entity_resolver::{EntityResolver, ResolvedEntity};
+pub use matrix_writer::{build_matrix_bytes, set_cost, write_matrix};
 pub use ontology::{OntologyEntry, OntologyFormat, OntologyStats, import_ontology};
-pub use sysdic_writer::{DicEntry, WriteSysDicStats, write_sysdic};
+pub use sysdic_writer::{
+    build_sysdic_bytes, build_unkdic_bytes, write_sysdic, DicEntry, WriteSysDicStats,
+};
+pub use synthetic::{build_synthetic_dictionary, SyntheticDictionary};
 pub use wikidata::{
     BuildConfig, BuildProgress, BuildResult, WikidataEntry, WikidataIndex, WikidataProcessor,
 };
@@ -97,14 +97,6 @@ pub fn create_progress_bar(total: u64, msg: &str) -> ProgressBar {
 /// Build a semantic dictionary from sources
 ///
 /// This is the main entry point for the build pipeline.
-///
-/// # Arguments
-///
-/// * `config` - Build configuration
-///
-/// # Returns
-///
-/// Build result with statistics
 pub async fn build_dictionary(config: BuildConfig) -> Result<BuildResult> {
     let processor = WikidataProcessor::new(config)?;
     processor.run().await

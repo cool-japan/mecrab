@@ -125,9 +125,7 @@ impl Vocabulary {
             self.min_count,
             self.words.len()
         );
-        if self.words.is_empty() {
-            eprintln!("  Remapped IDs: (empty vocabulary)");
-        } else {
+        if !self.words.is_empty() {
             eprintln!(
                 "  Remapped IDs: 0-{} (dense indexing)",
                 self.words.len() - 1

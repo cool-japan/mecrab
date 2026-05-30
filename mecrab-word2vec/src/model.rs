@@ -71,6 +71,9 @@ pub struct TrainingConfig {
     pub threads: usize,
     /// Optional FastText-style subword configuration
     pub subword: Option<SubwordConfig>,
+    /// Attempt GPU-accelerated training when the `gpu` feature is enabled.
+    /// Falls back silently to CPU Hogwild! when no wgpu adapter is available.
+    pub use_gpu: bool,
 }
 
 impl Default for TrainingConfig {
@@ -86,6 +89,7 @@ impl Default for TrainingConfig {
             epochs: 3,
             threads: 8,
             subword: None,
+            use_gpu: false,
         }
     }
 }
@@ -411,6 +415,16 @@ impl Word2VecBuilder {
             max_n,
             bucket_count,
         });
+        self
+    }
+
+    /// Enable GPU-accelerated training (requires `--features gpu` at compile time).
+    ///
+    /// When enabled, [`Word2Vec::train_from_file`] attempts to acquire a wgpu GPU
+    /// adapter and dispatches training to [`crate::gpu::GpuTrainer`].  If no adapter
+    /// is available the training falls back silently to CPU Hogwild!.
+    pub fn use_gpu(mut self, flag: bool) -> Self {
+        self.config.use_gpu = flag;
         self
     }
 

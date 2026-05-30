@@ -15,14 +15,14 @@
 //! ```no_run
 //! use mecrab_word2vec::Word2VecBuilder;
 //!
-//! let model = Word2VecBuilder::new()
+//! let mut model = Word2VecBuilder::new()
 //!     .vector_size(100)
 //!     .window_size(5)
 //!     .negative_samples(5)
 //!     .min_count(10)
 //!     .epochs(3)
 //!     .threads(8)
-//!     .build()?;
+//!     .build_from_corpus("corpus.txt")?;
 //!
 //! model.train_from_file("corpus.txt")?;
 //! model.save_text("vectors.txt")?;
@@ -35,6 +35,11 @@ mod skipgram;
 pub mod subword;
 mod trainer;
 mod vocab;
+
+/// GPU-accelerated training via wgpu (enabled by `--features gpu`).
+/// Falls back to CPU Hogwild! when no adapter is available.
+#[cfg(feature = "gpu")]
+pub mod gpu;
 
 pub use model::{SubwordConfig, Word2Vec, Word2VecBuilder};
 pub use subword::CharNgramExtractor;

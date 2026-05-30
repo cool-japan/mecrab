@@ -78,6 +78,11 @@ pub enum VectorsCommands {
         /// file are used to look up surface forms for character n-gram extraction.
         #[arg(long = "surface-map", value_name = "FILE")]
         surface_map: Option<std::path::PathBuf>,
+
+        /// Attempt GPU-accelerated training via wgpu (requires the `gpu` crate feature).
+        /// Falls back silently to CPU Hogwild! when no GPU adapter is available.
+        #[arg(long, default_value_t = false)]
+        use_gpu: bool,
     },
     /// Convert word2vec/fastText format to MCV1 binary format
     Convert {
@@ -170,6 +175,7 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             subword_max_n,
             bucket_count,
             surface_map,
+            use_gpu,
         } => run_vectors_train(
             &input,
             &output,
@@ -188,6 +194,7 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             subword_max_n,
             bucket_count,
             surface_map.as_deref(),
+            use_gpu,
         ),
         VectorsCommands::Convert {
             input,
@@ -403,6 +410,7 @@ fn run_vectors_train(
     subword_max_n: Option<usize>,
     bucket_count: usize,
     surface_map_path: Option<&Path>,
+    use_gpu: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
     use mecrab_word2vec::Word2VecBuilder;
 
@@ -451,6 +459,15 @@ fn run_vectors_train(
         eprintln!("  Loaded {} surface forms from map", surface_map.len());
     }
 
+    if use_gpu {
+        eprintln!("  GPU: requested (--features gpu required; falls back to CPU if no adapter)");
+        #[cfg(not(feature = "gpu"))]
+        eprintln!(
+            "  Warning: --gpu requested but kizame was compiled without --features gpu; \
+             training will use CPU Hogwild!"
+        );
+    }
+
     // Build model
     let builder = Word2VecBuilder::new()
         .vector_size(size)
@@ -461,7 +478,8 @@ fn run_vectors_train(
         .alpha(alpha)
         .min_alpha(min_alpha)
         .epochs(epochs)
-        .threads(threads);
+        .threads(threads)
+        .use_gpu(use_gpu);
 
     // Apply subword configuration if requested
     let builder = match (subword_min_n, subword_max_n) {

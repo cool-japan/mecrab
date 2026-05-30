@@ -260,3 +260,33 @@
 - [x] GitHub Actions CI (ubuntu + macos matrix, clippy -D warnings, nextest)
 - [x] GitHub Actions release workflow (auto release notes on v* tags, draft)
 - [x] Direct sys.dic generation — DA-trie binary builder implemented in mecrab-builder
+
+## v0.3.0 Additions (2026-05-30)
+
+### Completed
+
+#### GPU Acceleration
+- [x] wgpu-backed skip-gram training (`mecrab-word2vec --features gpu`)
+- [x] WGSL compute shader (dot→sigmoid→g→Hogwild! weight update)
+- [x] `GpuContext::try_new()` — graceful CPU fallback when no adapter
+- [x] `GpuTrainer`: upload syn0/syn1neg, batch dispatch (≤16k pairs), read-back
+- [x] `TrainingConfig::use_gpu` field; `Word2VecBuilder::use_gpu()` builder method
+- [x] `kizame vectors train --gpu` flag (advisory warning when gpu feature not compiled)
+- [ ] GPU parity validation (requires a real GPU adapter — unvalidated in CI)
+
+#### NFKC Normalization
+- [x] Real NFKC via `unicode-normalization` crate (`normalize.rs`)
+- [x] ㌔→キロ, ①→1, combining marks, all NFC/NFD/NFKD forms
+
+#### F16/I8 Vector Quantization
+- [x] `VectorStore::get_dequantized()` — zero-copy F32, decoded F16/I8
+- [x] `quantize_f16()` / `quantize_i8()` MCV1-format binary writers
+- [x] `mean_pooling` now works for all three dtypes
+- [x] Manual IEEE-754 half-precision converter (no extra crate)
+
+#### Synthetic Dictionary & E2E Testing
+- [x] `MeCrab::from_dictionary()` and `MeCrab::from_bytes()` constructors
+- [x] `build_synthetic_dictionary()` — in-memory MeCab dict (sys.dic+matrix+char+unk)
+- [x] `build_matrix_bytes`, `build_char_bytes`, `build_sysdic_bytes/build_unkdic_bytes` writers
+- [x] `mecrab-builder/tests/end_to_end.rs` — 7 E2E tests, no IPADIC required
+- [x] Correct segmentation of すもももももももものうち validated end-to-end

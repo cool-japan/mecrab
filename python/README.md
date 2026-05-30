@@ -945,20 +945,17 @@ print(f"Similarity: {sim:.3f}")
    - Use `mecrab-word2vec` CLI tool to train embeddings
    - Vectors must be indexed by dictionary word_ids
 
-2. **most_similar() and analogy() not yet fully implemented**
-   - Requires vocabulary iteration
-   - Use `similarity()` for pairwise comparison instead
-   - Use `sentence_embedding()` with external ANN index for most_similar
+2. **most_similar() and analogy() are fully implemented** (linear scan, O(V×D))
+   - Both methods available in `mecrab.MeCrab` (Python bindings: `python/vectors.rs`)
+   - For large vocabularies, consider building an external ANN index over `sentence_embedding()` outputs
 
 ### Future Enhancements
 
 ```python
-# Future API (roadmap)
-# Full most_similar with ANN index
+# Already available
 similar = m.most_similar("東京", topn=10)
 # => [('京都', 0.85), ('大阪', 0.82), ...]
 
-# Word analogy
 result = m.analogy("王様", "男", "女", topn=5)
 # => [('女王', 0.92), ...]
 ```

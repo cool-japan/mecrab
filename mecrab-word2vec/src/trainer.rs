@@ -62,6 +62,16 @@ impl Trainer {
         syn1neg: &mut [f32],
         syn_ng: &mut [f32],
     ) -> Result<()> {
+        // ── GPU fast path (only active when `gpu` feature is compiled in) ──────
+        #[cfg(feature = "gpu")]
+        if self.config.use_gpu {
+            if let Some(ctx) = crate::gpu::GpuContext::try_new() {
+                eprintln!("GPU adapter found — using wgpu-accelerated training");
+                return self.train_gpu(&ctx, syn0, syn1neg);
+            }
+            eprintln!("GPU unavailable (no wgpu adapter), falling back to CPU Hogwild!");
+        }
+
         let vocab_size = self.vocab.len();
         let array_size = syn0.len(); // Actual array size: vocab_size * vector_size
 
@@ -642,5 +652,101 @@ impl Trainer {
         }
 
         Ok(sentences)
+    }
+
+    /// GPU training path — mirrors the CPU Hogwild! loop but dispatches WGSL
+    /// compute shaders via wgpu.  `syn_ng` (subword) always falls back to CPU
+    /// because subword updates are interleaved with the main embedding; only the
+    /// standard skip-gram weights are GPU-accelerated.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if corpus loading fails.
+    #[cfg(feature = "gpu")]
+    fn train_gpu(
+        &mut self,
+        ctx: &crate::gpu::GpuContext,
+        syn0: &mut [f32],
+        syn1neg: &mut [f32],
+    ) -> Result<()> {
+        use crate::gpu::{GpuTrainer, TrainingPair};
+
+        let vocab_size = self.vocab.len();
+        let vector_size = self.config.vector_size;
+
+        eprintln!("GPU training — vocab_size={} vector_size={}", vocab_size, vector_size);
+
+        let sentences = self.load_corpus()?;
+        let total_sentences = sentences.len();
+        let mut skipgram = SkipGram::new();
+        let word_counts: Vec<(u32, u64)> = self
+            .vocab
+            .iter()
+            .map(|info| (info.remapped_id, info.count))
+            .collect();
+        skipgram.build_neg_table(&word_counts);
+
+        let words_per_epoch = self.vocab.total_words();
+        let total_words_all_epochs = words_per_epoch * self.config.epochs as u64;
+
+        let gpu_trainer = GpuTrainer::new(ctx, syn0, syn1neg, vector_size);
+
+        for epoch in 0..self.config.epochs {
+            let epoch_start = epoch as u64 * words_per_epoch;
+            let alpha = self.config.alpha
+                - (self.config.alpha - self.config.min_alpha)
+                    * (epoch_start as f32 / total_words_all_epochs as f32);
+
+            eprintln!("Epoch {}/{} — alpha={:.6}", epoch + 1, self.config.epochs, alpha);
+
+            let mut rng = rand::rng();
+            let mut batch: Vec<TrainingPair> = Vec::with_capacity(16384);
+
+            for sentence in &sentences {
+                if sentence.is_empty() { continue; }
+                for (pos, &center_id) in sentence.iter().enumerate() {
+                    let center_remapped = match self.vocab.get_remapped_id(center_id) {
+                        Some(id) => id,
+                        None => continue,
+                    };
+                    let window = rng.random_range(1..=self.config.window_size);
+                    for offset in 1..=window {
+                        let neighbors = [
+                            pos.checked_sub(offset).map(|i| sentence[i]),
+                            if pos + offset < sentence.len() { Some(sentence[pos + offset]) } else { None },
+                        ];
+                        for ctx_id in neighbors.iter().flatten() {
+                            let ctx_remapped = match self.vocab.get_remapped_id(*ctx_id) {
+                                Some(id) => id,
+                                None => continue,
+                            };
+                            // Positive pair
+                            batch.push(TrainingPair { center: center_remapped, context: ctx_remapped, label: 1, _pad: 0 });
+                            // Negative samples
+                            for _ in 0..self.config.negative_samples {
+                                let neg = skipgram.sample_negative(&mut rng);
+                                if neg != ctx_remapped {
+                                    batch.push(TrainingPair { center: center_remapped, context: neg, label: 0, _pad: 0 });
+                                }
+                            }
+                            // Dispatch when batch is large enough
+                            if batch.len() >= 16384 {
+                                gpu_trainer.train_batch(&batch, alpha);
+                                batch.clear();
+                            }
+                        }
+                    }
+                }
+            }
+            if !batch.is_empty() {
+                gpu_trainer.train_batch(&batch, alpha);
+                batch.clear();
+            }
+            eprintln!("  Epoch {} done — processed {} sentences", epoch + 1, total_sentences);
+        }
+
+        gpu_trainer.read_back(syn0, syn1neg);
+        eprintln!("GPU training complete — weights read back to host");
+        Ok(())
     }
 }

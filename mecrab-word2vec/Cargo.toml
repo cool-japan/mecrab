@@ -11,6 +11,13 @@ description = "High-performance Word2Vec implementation with Hogwild! paralleliz
 keywords = ["nlp", "word2vec", "embeddings", "japanese", "hogwild"]
 categories = ["science", "text-processing"]
 
+[features]
+## Default feature set — no GPU (zero extra deps on plain `cargo build`)
+default = []
+## Enable GPU-accelerated training via wgpu (Vulkan / Metal / DX12 / GL / noop).
+## Falls back to CPU Hogwild! silently when no adapter is available.
+gpu = ["dep:wgpu", "dep:pollster", "dep:bytemuck"]
+
 [dependencies]
 rayon.workspace = true
 rand = "0.10"
@@ -18,6 +25,9 @@ anyhow = "1.0"
 thiserror.workspace = true
 memmap2.workspace = true
 byteorder.workspace = true
+wgpu    = { workspace = true, optional = true }
+pollster = { workspace = true, optional = true }
+bytemuck = { workspace = true, optional = true }
 
 [dev-dependencies]
-criterion = "0.8"
+criterion = "0.5"
