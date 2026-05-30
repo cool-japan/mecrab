@@ -137,6 +137,90 @@ pub mod wasm32_simd {
     }
 }
 
+// ── WASM i64x2 SIMD argmin ───────────────────────────────────────────────────
+
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+pub mod wasm_i64 {
+    use core::arch::wasm32::*;
+
+    /// Argmin of prev[i] + conn[i] + wcost over the slice.
+    ///
+    /// Uses i64x2 SIMD (2 lanes per iteration). Returns `None` if no candidate
+    /// strictly improves on `best_so_far`.
+    ///
+    /// # Safety
+    ///
+    /// Requires `simd128` target feature, enforced by the enclosing `cfg` guard.
+    #[target_feature(enable = "simd128")]
+    pub unsafe fn batch_min_argmin_i64_wasm(
+        prev: &[i64],
+        conn: &[i32],
+        wcost: i64,
+        best_so_far: i64,
+    ) -> Option<(usize, i64)> {
+        let len = prev.len().min(conn.len());
+        if len == 0 {
+            return None;
+        }
+
+        // Broadcast the word cost into both SIMD lanes.
+        let wcost_v = i64x2_splat(wcost);
+
+        let mut best_val = best_so_far;
+        // `usize::MAX` is our "no-improvement" sentinel.
+        let mut best_idx = usize::MAX;
+
+        let chunks = len / 2;
+
+        for chunk in 0..chunks {
+            let base = chunk * 2;
+            // SAFETY: chunk < chunks = len/2, so base = chunk*2 and base+1 are
+            // both strictly less than len, which is within bounds for both slices.
+            let p0 = *prev.get_unchecked(base);
+            let p1 = *prev.get_unchecked(base + 1);
+            let prev_v = i64x2(p0, p1);
+
+            // Widen i32 → i64 before constructing the SIMD vector.
+            let c0 = *conn.get_unchecked(base) as i64;
+            let c1 = *conn.get_unchecked(base + 1) as i64;
+            let conn_v = i64x2(c0, c1);
+
+            // total = prev + conn + wcost  (2 lanes in parallel).
+            let total_v = i64x2_add(i64x2_add(prev_v, conn_v), wcost_v);
+
+            // WASM has no horizontal i64 min instruction, so we extract each lane
+            // and compare scalarly — the vectorised add above still saves work.
+            let t0 = i64x2_extract_lane::<0>(total_v);
+            let t1 = i64x2_extract_lane::<1>(total_v);
+
+            if t0 < best_val {
+                best_val = t0;
+                best_idx = base;
+            }
+            if t1 < best_val {
+                best_val = t1;
+                best_idx = base + 1;
+            }
+        }
+
+        // Scalar tail for the remainder element (if len is odd).
+        for i in (chunks * 2)..len {
+            // SAFETY: i < len, both slices have length ≥ len.
+            let total = prev.get_unchecked(i) + *conn.get_unchecked(i) as i64 + wcost;
+            if total < best_val {
+                best_val = total;
+                best_idx = i;
+            }
+        }
+
+        if best_idx == usize::MAX {
+            None
+        } else {
+            Some((best_idx, best_val))
+        }
+    }
+}
+
 // ── WASM SIMD gather+widen ────────────────────────────────────────────────────
 
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]

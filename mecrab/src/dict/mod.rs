@@ -289,10 +289,14 @@ impl Dictionary {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// // Requires a real MeCab dictionary installed
+    /// // (install ipadic: `sudo apt install mecab-ipadic-utf8`)
     /// use mecrab::dict::{Dictionary, OverlayEntry};
+    /// use std::path::Path;
     ///
-    /// let dict = Dictionary::load(path)?;
+    /// let path = Path::new("/var/lib/mecab/dic/ipadic-utf8");
+    /// let dict = Dictionary::load(path).unwrap();
     /// dict.add_word("ChatGPT", OverlayEntry::new(
     ///     "名詞,固有名詞,一般,*,*,*,ChatGPT,チャットジーピーティー,チャットジーピーティー",
     ///     5000,

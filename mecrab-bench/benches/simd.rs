@@ -13,6 +13,7 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mecrab::batch_connection_costs;
+use mecrab::viterbi::simd::{batch_min_argmin_i64, scalar_impl};
 use std::hint::black_box;
 
 // ── Synthetic data generation ──────────────────────────────────────────────
@@ -148,6 +149,55 @@ fn bench_row_widths(c: &mut Criterion) {
     group.finish();
 }
 
+/// Benchmark the i64 argmin kernel that is the new Viterbi hot path.
+///
+/// Simulates a single `scan_predecessors` call over a batch of predecessors:
+/// - `prev[i]` = cumulative Viterbi cost at predecessor i
+/// - `conn[i]` = connection cost (already gathered)
+/// - `wcost`   = word cost of the target node
+fn bench_argmin_i64(c: &mut Criterion) {
+    let mut group = c.benchmark_group("batch_min_argmin_i64");
+
+    for &batch_size in &[4usize, 8, 16, 64, 256] {
+        let prev: Vec<i64> = (0..batch_size as i64).map(|i| 1000 + i * 37).collect();
+        let conn: Vec<i32> = (0..batch_size as i32).map(|i| 100 + (i * 13) % 500).collect();
+        let wcost: i64 = 200;
+        let best_so_far: i64 = i64::MAX / 2;
+
+        group.bench_with_input(
+            BenchmarkId::new("dispatch", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    batch_min_argmin_i64(
+                        black_box(&prev),
+                        black_box(&conn),
+                        black_box(wcost),
+                        black_box(best_so_far),
+                    )
+                })
+            },
+        );
+
+        group.bench_with_input(
+            BenchmarkId::new("scalar_ref", batch_size),
+            &batch_size,
+            |b, _| {
+                b.iter(|| {
+                    scalar_impl::batch_min_argmin_i64(
+                        black_box(&prev),
+                        black_box(&conn),
+                        black_box(wcost),
+                        black_box(best_so_far),
+                    )
+                })
+            },
+        );
+    }
+
+    group.finish();
+}
+
 // ── Criterion main ─────────────────────────────────────────────────────────
 
 criterion_group!(
@@ -168,4 +218,15 @@ criterion_group!(
     targets = bench_row_widths
 );
 
-criterion_main!(batch_size_benches, inner_loop_benches, row_width_benches);
+criterion_group!(
+    name = argmin_i64_benches;
+    config = Criterion::default();
+    targets = bench_argmin_i64
+);
+
+criterion_main!(
+    batch_size_benches,
+    inner_loop_benches,
+    row_width_benches,
+    argmin_i64_benches
+);

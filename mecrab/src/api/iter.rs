@@ -14,10 +14,15 @@ impl MeCrab {
     ///
     /// # Example
     ///
-    /// ```ignore
+    /// ```no_run
+    /// // Requires a real MeCab dictionary installed
+    /// // (install ipadic: `sudo apt install mecab-ipadic-utf8`)
+    /// use mecrab::MeCrab;
+    /// let mecrab = MeCrab::new().unwrap();
+    /// let texts = vec!["東京は日本の首都です。", "今日はいい天気ですね。"];
     /// for result in mecrab.parse_iter(&texts) {
     ///     match result {
-    ///         Ok(analysis) => process(analysis),
+    ///         Ok(analysis) => println!("{:?}", analysis),
     ///         Err(e) => eprintln!("Error: {e}"),
     ///     }
     /// }

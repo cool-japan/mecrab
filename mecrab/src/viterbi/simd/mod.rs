@@ -44,6 +44,8 @@ pub use x86::x86_impl;
 use wasm::wasm_gather;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use wasm::wasm32_simd;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use wasm::wasm_i64;
 
 pub use scalar as scalar_impl;
 
@@ -215,7 +217,7 @@ pub fn find_best_predecessor(prev_costs: &[i32], connection_costs: &[i16]) -> Op
 /// - **aarch64** (NEON mandatory): 2 × i64 lanes via `int64x2_t`.
 /// - **x86_64**: AVX2 (4 × i64) → SSE4.1 (2 × i64) → scalar, with runtime
 ///   `is_x86_feature_detected!` for baseline builds.
-/// - **wasm32 + simd128**: scalar (no i64 wasm SIMD path yet).
+/// - **wasm32 + simd128**: 2-lane i64x2 SIMD via WebAssembly SIMD128.
 /// - **other**: scalar reference implementation.
 #[inline]
 pub fn batch_min_argmin_i64(
@@ -232,17 +234,26 @@ pub fn batch_min_argmin_i64(
         };
     }
 
-    #[cfg(not(target_arch = "aarch64"))]
+    #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
-        #[cfg(target_arch = "x86_64")]
-        {
-            x86_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
-        }
-
-        // Scalar fallback: wasm32+simd128, other architectures.
-        #[cfg(not(target_arch = "x86_64"))]
-        scalar_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
+        // SAFETY: simd128 compile-time cfg guarantees the feature is available.
+        return unsafe {
+            wasm_i64::batch_min_argmin_i64_wasm(prev, conn, wcost, best_so_far)
+        };
     }
+
+    #[cfg(target_arch = "x86_64")]
+    {
+        x86_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
+    }
+
+    // Scalar fallback: other architectures (non-wasm32+simd128, non-aarch64, non-x86_64).
+    #[cfg(not(any(
+        target_arch = "aarch64",
+        all(target_arch = "wasm32", target_feature = "simd128"),
+        target_arch = "x86_64",
+    )))]
+    scalar_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
 }
 
 /// Batch process predecessor costs: result[i] = prev_costs[i] + connection_costs[i].

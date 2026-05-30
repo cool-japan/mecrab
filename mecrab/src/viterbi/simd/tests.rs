@@ -453,6 +453,55 @@ fn test_scalar_batch_min_argmin_i64_reference() {
     assert_eq!(result2, Some((2, 106)));
 }
 
+// ── wasm32 i64x2 SIMD tests (platform-independent correctness) ───────────
+
+#[test]
+fn test_batch_min_argmin_i64_matches_scalar() {
+    // Dispatch result must match scalar reference on several representative inputs.
+    let test_cases: &[(&[i64], &[i32], i64, i64)] = &[
+        (&[10, 5, 8, 3, 12], &[2, 4, 1, 6, 3], 1, i64::MAX),
+        (&[100, 200], &[50, 25], 10, i64::MAX),
+        (&[1, 1, 1, 1, 1, 1, 1, 1], &[8, 7, 6, 5, 4, 3, 2, 1], 0, i64::MAX),
+        (&[0], &[0], 42, i64::MAX),
+    ];
+    for &(prev, conn, wcost, best_so_far) in test_cases {
+        let scalar =
+            crate::viterbi::simd::scalar_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far);
+        let dispatch =
+            crate::viterbi::simd::batch_min_argmin_i64(prev, conn, wcost, best_so_far);
+        // Both must return the same minimum *value* (ties on index are acceptable).
+        assert_eq!(
+            scalar.map(|(_, v)| v),
+            dispatch.map(|(_, v)| v),
+            "SIMD/scalar value mismatch: prev={prev:?}, conn={conn:?}, \
+             wcost={wcost}, best={best_so_far}"
+        );
+        // If an index is returned, it must point to the same total cost.
+        if let (Some((si, _)), Some((di, _))) = (scalar, dispatch) {
+            let s_total = prev[si] + conn[si] as i64 + wcost;
+            let d_total = prev[di] + conn[di] as i64 + wcost;
+            assert_eq!(
+                s_total, d_total,
+                "SIMD/scalar index mismatch produces different sums: \
+                 scalar_idx={si} dispatch_idx={di}"
+            );
+        }
+    }
+}
+
+#[test]
+fn test_batch_min_argmin_i64_no_improvement_returns_none() {
+    // When all totals >= best_so_far the function must return None.
+    let prev = [10i64, 20, 30];
+    let conn = [5i32, 5, 5];
+    let wcost = 0i64;
+    // 10+5+0=15, 20+5+0=25, 30+5+0=35 — all > 10.
+    let best_so_far = 10i64;
+    let result =
+        crate::viterbi::simd::batch_min_argmin_i64(&prev, &conn, wcost, best_so_far);
+    assert!(result.is_none(), "expected None, got {result:?}");
+}
+
 // ── SimdStats ────────────────────────────────────────────────────────────
 
 #[test]
