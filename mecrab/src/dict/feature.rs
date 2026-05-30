@@ -5,8 +5,6 @@
 //! This module handles the feature string table that maps feature IDs
 //! to human-readable feature strings (POS, reading, pronunciation, etc.).
 
-use crate::{Error, Result};
-use byteorder::{ByteOrder, LittleEndian};
 
 /// Feature table storing feature strings
 #[derive(Debug)]
@@ -16,34 +14,6 @@ pub struct FeatureTable {
 }
 
 impl FeatureTable {
-    /// Create a feature table from raw dictionary bytes
-    ///
-    /// The feature data is located after the trie data in sys.dic.
-    ///
-    /// # Errors
-    ///
-    /// Returns an error if the data is corrupted.
-    #[allow(dead_code)]
-    pub fn from_bytes(data: &[u8]) -> Result<Self> {
-        // The feature section starts after the trie data
-        // For now, we'll extract what we can from the dictionary
-
-        // Skip the header and trie arrays to find feature data
-        if data.len() < 72 {
-            return Err(Error::FeatureParseError(
-                "Data too small for feature table".to_string(),
-            ));
-        }
-
-        let feature_size = LittleEndian::read_u32(&data[32..36]) as usize;
-
-        // For now, return an empty table - actual parsing requires
-        // understanding the exact dictionary format
-        let features = Vec::with_capacity(feature_size);
-
-        Ok(Self { features })
-    }
-
     /// Get a feature string by ID
     pub fn get(&self, feature_id: u32) -> Option<&str> {
         self.features.get(feature_id as usize).map(String::as_str)

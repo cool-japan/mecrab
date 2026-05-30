@@ -6,6 +6,7 @@
 //! - Prefix table: Common URI prefixes
 //! - String pool: URI suffixes (null-terminated)
 
+use crate::error::Error;
 use std::collections::HashMap;
 use std::fmt;
 use std::io::{Read, Write};
@@ -276,8 +277,40 @@ impl SemanticPoolBuilder {
         stats
     }
 
-    /// Write to binary format
-    pub fn write_to<W: Write>(&self, w: &mut W) -> std::io::Result<()> {
+    /// Add a custom URI prefix to the prefix table.
+    ///
+    /// Returns an error if the prefix exceeds 63 bytes of UTF-8 encoding
+    /// (the on-disk format allocates a 64-byte fixed buffer, one byte of which
+    /// is reserved for the null terminator).
+    pub fn add_custom_prefix(&mut self, prefix: &str) -> crate::error::Result<()> {
+        if prefix.len() > 63 {
+            return Err(Error::InvalidDictionaryFormat(format!(
+                "Custom prefix too long (max 63 bytes UTF-8): {}",
+                prefix
+            )));
+        }
+        self.custom_prefixes.push(prefix.to_string());
+        Ok(())
+    }
+
+    /// Write to binary format.
+    ///
+    /// Returns an error if any stored prefix exceeds 63 UTF-8 bytes (which
+    /// would be silently truncated in the on-disk format).  Use
+    /// [`add_custom_prefix`](Self::add_custom_prefix) to validate prefixes at
+    /// insertion time instead.
+    pub fn write_to<W: Write>(&self, w: &mut W) -> crate::error::Result<()> {
+        // Validate all prefixes before writing anything so the stream is never
+        // partially written when a long prefix would corrupt it.
+        for prefix in &self.custom_prefixes {
+            if prefix.len() > 63 {
+                return Err(Error::InvalidDictionaryFormat(format!(
+                    "Custom prefix too long (max 63 bytes UTF-8): {}",
+                    prefix
+                )));
+            }
+        }
+
         let entries_size = self.entries.len() * Entry::SIZE;
         let prefix_table_offset = Header::SIZE + entries_size;
         let string_pool_offset = prefix_table_offset + 2 + self.custom_prefixes.len() * 64;
@@ -293,12 +326,14 @@ impl SemanticPoolBuilder {
             entry.write_to(w)?;
         }
 
-        // Prefix table (simplified)
+        // Prefix table: 2-byte count followed by 64-byte fixed records.
+        // Each record: up to 63 bytes of UTF-8 followed by a null byte.
         w.write_all(&(self.custom_prefixes.len() as u16).to_le_bytes())?;
         for prefix in &self.custom_prefixes {
             let mut buf = [0u8; 64];
             let bytes = prefix.as_bytes();
-            buf[..bytes.len().min(63)].copy_from_slice(&bytes[..bytes.len().min(63)]);
+            // len() <= 63 guaranteed by the validation above
+            buf[..bytes.len()].copy_from_slice(bytes);
             w.write_all(&buf)?;
         }
 
@@ -550,5 +585,80 @@ mod tests {
         let display = format!("{}", stats);
         assert!(display.contains("Entries:"));
         assert!(display.contains("Wikidata:"));
+    }
+
+    #[test]
+    fn test_prefix_table_long_prefix_rejected() {
+        // A prefix of exactly 64 bytes (> 63) must be rejected.
+        let long_prefix = "a".repeat(64);
+        let mut builder = SemanticPoolBuilder::new();
+        let result = builder.add_custom_prefix(&long_prefix);
+        assert!(
+            result.is_err(),
+            "add_custom_prefix should return Err for prefix > 63 bytes"
+        );
+
+        // Also verify rejection via write_to when the prefix was pushed directly
+        // (simulates older code paths that bypass add_custom_prefix).
+        let mut builder2 = SemanticPoolBuilder::new();
+        builder2.custom_prefixes.push(long_prefix);
+        let mut buf = Vec::new();
+        let result2 = builder2.write_to(&mut buf);
+        assert!(
+            result2.is_err(),
+            "write_to should return Err when a stored prefix exceeds 63 bytes"
+        );
+    }
+
+    #[test]
+    fn test_prefix_table_roundtrip() {
+        // Prefixes at exactly 63 bytes (max allowed), 1 byte, and 30 bytes
+        // should all be accepted and survive write_to without error.
+        let prefix_max = "x".repeat(63);
+        let prefix_short = "http://short.org/";
+        let prefix_mid = "http://medium-length-namespace.example.org/v1/";
+
+        let mut builder = SemanticPoolBuilder::new();
+        builder.add_custom_prefix(&prefix_max).unwrap();
+        builder.add_custom_prefix(prefix_short).unwrap();
+        builder.add_custom_prefix(prefix_mid).unwrap();
+
+        // Add a couple of entries to make the pool non-trivial
+        builder.add(
+            "http://www.wikidata.org/entity/Q999",
+            0.9,
+            OntologySource::Wikidata,
+        );
+        builder.add(
+            "http://dbpedia.org/resource/Kyoto",
+            0.85,
+            OntologySource::DBpedia,
+        );
+
+        let mut buf = Vec::new();
+        builder.write_to(&mut buf).unwrap();
+
+        // The serialised blob must be parseable and entries must round-trip.
+        let pool = SemanticPool::from_bytes(&buf).unwrap();
+        assert_eq!(pool.len(), 2);
+        assert_eq!(
+            pool.get(1),
+            Some("http://www.wikidata.org/entity/Q999".to_string())
+        );
+        assert_eq!(
+            pool.get(2),
+            Some("http://dbpedia.org/resource/Kyoto".to_string())
+        );
+    }
+
+    #[test]
+    fn test_prefix_table_exactly_63_bytes_accepted() {
+        // A prefix of exactly 63 bytes must be accepted (boundary case).
+        let prefix = "b".repeat(63);
+        let mut builder = SemanticPoolBuilder::new();
+        assert!(
+            builder.add_custom_prefix(&prefix).is_ok(),
+            "63-byte prefix must be accepted"
+        );
     }
 }

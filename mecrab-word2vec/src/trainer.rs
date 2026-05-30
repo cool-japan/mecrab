@@ -750,3 +750,154 @@ impl Trainer {
         Ok(())
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::model::{TrainingConfig, Word2VecBuilder};
+
+    /// Write a minimal corpus of whitespace-separated u32 token IDs to a temp
+    /// file and return the path.  All IDs appear frequently enough to survive
+    /// min_count filtering.
+    fn write_tiny_corpus() -> PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = std::env::temp_dir().join(format!("mecrab_trainer_test_{nanos}.txt"));
+        // Repeat sentences so every token appears at least 5 times
+        let text = "0 1 2 3 4\n1 2 3 4 5\n0 2 4 6 8\n1 3 5 7 9\n0 1 3 5 7\n\
+                    2 4 6 8 0\n3 5 7 9 1\n0 3 6 9 2\n1 4 7 0 3\n2 5 8 1 4\n\
+                    0 1 2 3 4\n1 2 3 4 5\n0 2 4 6 8\n1 3 5 7 9\n0 1 3 5 7\n";
+        std::fs::write(&path, text).expect("write corpus");
+        path
+    }
+
+    // ── Trainer::train produces finite, non-zero embeddings ───────────────────
+
+    #[test]
+    fn test_trainer_train_produces_finite_embeddings() {
+        let corpus_path = write_tiny_corpus();
+
+        let config = TrainingConfig {
+            vector_size: 8,
+            window_size: 2,
+            negative_samples: 2,
+            min_count: 1,
+            sample: 0.0,
+            alpha: 0.025,
+            min_alpha: 0.0001,
+            epochs: 2,
+            threads: 1,
+            subword: None,
+            use_gpu: false,
+        };
+
+        let mut vocab = Vocabulary::new(1, 0.0);
+        vocab
+            .build_from_file(&corpus_path)
+            .expect("build vocab from corpus");
+        assert!(!vocab.is_empty(), "vocabulary must not be empty");
+
+        let vocab_arc = Arc::new(vocab);
+        let vocab_size = vocab_arc.len();
+        let vector_size = config.vector_size;
+        let array_size = vocab_size * vector_size;
+
+        // Initialise embeddings (random small values, matching Word2Vec::new logic)
+        let mut syn0: Vec<f32> = (0..array_size)
+            .map(|i| ((i as f32 * 1.234).sin()) / vector_size as f32)
+            .collect();
+        let mut syn1neg = vec![0.0_f32; array_size];
+        let mut syn_ng: Vec<f32> = Vec::new();
+
+        let mut trainer = Trainer::new(&corpus_path, vocab_arc, &config);
+        trainer
+            .train(&mut syn0, &mut syn1neg, &mut syn_ng)
+            .expect("trainer.train should succeed");
+
+        // All trained values must be finite
+        for (i, &v) in syn0.iter().enumerate() {
+            assert!(v.is_finite(), "syn0[{i}] must be finite, got {v}");
+        }
+        for (i, &v) in syn1neg.iter().enumerate() {
+            assert!(v.is_finite(), "syn1neg[{i}] must be finite, got {v}");
+        }
+
+        // At least one weight must have changed from the initial value
+        let initial: Vec<f32> = (0..array_size)
+            .map(|i| ((i as f32 * 1.234).sin()) / vector_size as f32)
+            .collect();
+        let any_changed = syn0.iter().zip(initial.iter()).any(|(a, b)| (a - b).abs() > 1e-9);
+        assert!(any_changed, "training must update at least one weight");
+
+        let _ = std::fs::remove_file(&corpus_path);
+    }
+
+    // ── Word2VecBuilder end-to-end produces finite embeddings ─────────────────
+
+    #[test]
+    fn test_builder_training_all_finite() {
+        let corpus_path = write_tiny_corpus();
+
+        let mut model = Word2VecBuilder::new()
+            .vector_size(8)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .alpha(0.025)
+            .min_alpha(0.0001)
+            .epochs(2)
+            .threads(1)
+            .build_from_corpus(&corpus_path)
+            .expect("build_from_corpus should succeed");
+
+        model
+            .train_from_file(&corpus_path)
+            .expect("train_from_file should succeed");
+
+        // All syn0 embeddings must be finite
+        for (i, &v) in model.syn0.iter().enumerate() {
+            assert!(v.is_finite(), "syn0[{i}] must be finite after training, got {v}");
+        }
+        // At least one embedding must be non-zero (training must change something)
+        let any_nonzero = model.syn0.iter().any(|&v| v != 0.0);
+        assert!(any_nonzero, "syn0 must have at least one non-zero value after training");
+
+        let _ = std::fs::remove_file(&corpus_path);
+    }
+
+    // ── GPU flag with no adapter falls back to CPU ────────────────────────────
+
+    #[cfg(feature = "gpu")]
+    #[test]
+    fn test_gpu_flag_with_no_adapter_falls_back_to_cpu() {
+        let corpus_path = write_tiny_corpus();
+
+        let mut model = Word2VecBuilder::new()
+            .vector_size(8)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(1)
+            .threads(1)
+            .use_gpu(true) // request GPU; falls back if no adapter
+            .build_from_corpus(&corpus_path)
+            .expect("build_from_corpus must succeed even with gpu=true");
+
+        model
+            .train_from_file(&corpus_path)
+            .expect("training with gpu=true must succeed via CPU fallback");
+
+        for (i, &v) in model.syn0.iter().enumerate() {
+            assert!(
+                v.is_finite(),
+                "GPU-requested syn0[{i}] must be finite, got {v}"
+            );
+        }
+
+        let _ = std::fs::remove_file(&corpus_path);
+    }
+}

@@ -234,19 +234,22 @@ pub fn parse_wikidata_dump(
         }
 
         // Parallel parse + surface extraction
-        let parsed: Vec<(String, String, f32)> = chunk
+        // Each element: (surface, uri, confidence, entity_type_ids)
+        // entity_type_ids contains the P31 Q-IDs for the URI (may be empty).
+        let parsed: Vec<(String, String, f32, Vec<String>)> = chunk
             .par_iter()
             .flat_map(|line| {
                 let json_str = line.trim_end_matches(',');
                 match serde_json::from_str::<WikidataEntry>(json_str) {
                     Ok(entry) if entry.matches_type_filter(entity_type_filter) => {
                         let uri = format!("http://www.wikidata.org/entity/{}", entry.id);
+                        let type_ids = entry.entity_type_ids();
                         entry
                             .japanese_surfaces()
                             .into_iter()
                             .map(|surface| {
                                 let conf = entry.calibrated_confidence(&surface);
-                                (surface, uri.clone(), conf)
+                                (surface, uri.clone(), conf, type_ids.clone())
                             })
                             .collect::<Vec<_>>()
                     }
@@ -256,8 +259,9 @@ pub fn parse_wikidata_dump(
             .collect();
 
         // Sequential merge into index (index is not Sync)
-        for (surface, uri, confidence) in parsed {
+        for (surface, uri, confidence, type_ids) in parsed {
             index.add(&surface, &uri, confidence);
+            index.add_entity_types(&uri, type_ids);
         }
 
         count += chunk.len() as u64;
@@ -363,19 +367,21 @@ pub fn parse_wikidata_dump_streaming(
     let mut batches_consumed = 0u64;
 
     for batch in &receiver {
-        let parsed: Vec<(String, String, f32)> = batch
+        // Each element: (surface, uri, confidence, entity_type_ids)
+        let parsed: Vec<(String, String, f32, Vec<String>)> = batch
             .par_iter()
             .flat_map(|line| {
                 let json_str = line.trim_end_matches(',');
                 match serde_json::from_str::<WikidataEntry>(json_str) {
                     Ok(entry) if entry.matches_type_filter(entity_type_filter) => {
                         let uri = format!("http://www.wikidata.org/entity/{}", entry.id);
+                        let type_ids = entry.entity_type_ids();
                         entry
                             .japanese_surfaces()
                             .into_iter()
                             .map(|surface| {
                                 let conf = entry.calibrated_confidence(&surface);
-                                (surface, uri.clone(), conf)
+                                (surface, uri.clone(), conf, type_ids.clone())
                             })
                             .collect::<Vec<_>>()
                     }
@@ -384,8 +390,9 @@ pub fn parse_wikidata_dump_streaming(
             })
             .collect();
 
-        for (surface, uri, confidence) in parsed {
+        for (surface, uri, confidence, type_ids) in parsed {
             index.add(&surface, &uri, confidence);
+            index.add_entity_types(&uri, type_ids);
         }
 
         batches_consumed += 1;

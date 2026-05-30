@@ -189,6 +189,118 @@ pub mod neon_impl {
     }
 }
 
+// ── ARM NEON i64 argmin kernel ────────────────────────────────────────────────
+
+/// ARM NEON batch minimum argmin over i64 costs (2 × i64 per register).
+#[cfg(target_arch = "aarch64")]
+pub mod neon_i64 {
+    use core::arch::aarch64::{
+        int32x2_t, int64x2_t, vaddq_s64, vcgtq_s64, vbslq_s64, vgetq_lane_s64, vmovl_s32,
+        vld1_s32,
+    };
+
+    /// NEON-accelerated `batch_min_argmin_i64`.
+    ///
+    /// Computes `argmin_i(prev[i] + conn[i]) + wcost`, returning
+    /// `Some((index, min_total))` when a strictly-better candidate than
+    /// `best_so_far` is found, or `None` otherwise.
+    ///
+    /// Uses 2-lane `int64x2_t` registers.  NEON has no integer 64-bit min
+    /// intrinsic, so we use `vcgtq_s64` + `vbslq_s64` to compute
+    /// `min(a, b)` branchlessly.
+    ///
+    /// # Safety
+    ///
+    /// NEON is mandatory on all ARMv8 / Apple Silicon cores; no runtime check
+    /// needed.  Pointer arithmetic stays within `len`.
+    #[target_feature(enable = "neon")]
+    pub unsafe fn batch_min_argmin_i64_neon(
+        prev: &[i64],
+        conn: &[i32],
+        wcost: i64,
+        best_so_far: i64,
+    ) -> Option<(usize, i64)> {
+        let len = prev.len().min(conn.len());
+        if len == 0 {
+            return None;
+        }
+
+        let chunks2 = len / 2;
+        let ptr_p = prev.as_ptr();
+        let ptr_c = conn.as_ptr();
+
+        // Track the SIMD-prefix minimum as a 2-lane i64 vector.
+        let simd_min: i64 = if chunks2 > 0 {
+            // SAFETY: pointers valid for ≥ 2 elements (chunks2 ≥ 1).
+            // vld1_s32 loads 2 × i32; vmovl_s32 sign-extends to 2 × i64.
+            let p0: int64x2_t = unsafe {
+                core::arch::aarch64::vld1q_s64(ptr_p)
+            };
+            let c_narrow: int32x2_t = unsafe { vld1_s32(ptr_c) };
+            let c0: int64x2_t = vmovl_s32(c_narrow);
+            let mut lane_min: int64x2_t = vaddq_s64(p0, c0);
+
+            for chunk in 1..chunks2 {
+                // SAFETY: chunk < chunks2 ≤ len/2, offsets in-bounds.
+                let pv: int64x2_t = unsafe {
+                    core::arch::aarch64::vld1q_s64(ptr_p.add(chunk * 2))
+                };
+                let cn: int32x2_t = unsafe { vld1_s32(ptr_c.add(chunk * 2)) };
+                let cv: int64x2_t = vmovl_s32(cn);
+                let sv: int64x2_t = vaddq_s64(pv, cv);
+                // NEON has no vminq_s64; use compare + bitwise-select for min.
+                // vcgtq_s64 returns a mask with all-ones in lanes where lane_min > sv.
+                let gt_mask = vcgtq_s64(lane_min, sv);
+                // vbslq_s64(mask, a, b) selects a where mask is all-ones, b elsewhere.
+                // When lane_min > sv, we want sv (smaller), so: select sv where gt.
+                lane_min = vbslq_s64(
+                    core::mem::transmute::<int64x2_t, core::arch::aarch64::uint64x2_t>(gt_mask),
+                    sv,
+                    lane_min,
+                );
+            }
+
+            // Horizontal reduce: min of lane 0 and lane 1.
+            let l0 = vgetq_lane_s64(lane_min, 0);
+            let l1 = vgetq_lane_s64(lane_min, 1);
+            l0.min(l1)
+        } else {
+            i64::MAX
+        };
+
+        let covered = chunks2 * 2;
+        let mut best_idx = 0usize;
+        let mut best_total = best_so_far;
+        let mut found = false;
+
+        // Scan remainder (may beat SIMD prefix minimum).
+        for i in covered..len {
+            let total = prev[i] + conn[i] as i64 + wcost;
+            if total < best_total {
+                best_total = total;
+                best_idx = i;
+                found = true;
+            }
+        }
+
+        // Check whether SIMD prefix contains something better.
+        let simd_with_wcost = simd_min.saturating_add(wcost);
+        if simd_with_wcost < best_total {
+            for i in 0..covered {
+                let total = prev[i] + conn[i] as i64 + wcost;
+                if total == simd_with_wcost {
+                    best_total = simd_with_wcost;
+                    best_idx = i;
+                    found = true;
+                    break;
+                }
+            }
+        }
+
+        if found { Some((best_idx, best_total)) } else { None }
+    }
+}
+
 // ── ARM NEON gather+widen ─────────────────────────────────────────────────────
 
 /// ARM NEON gather+widen for batch connection cost lookups.

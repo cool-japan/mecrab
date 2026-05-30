@@ -74,6 +74,85 @@ pub fn to_romaji(text: &str) -> String {
     result
 }
 
+/// Collapse adjacent IPA vowel pairs into long vowels (post-pass).
+///
+/// Japanese phonology rules implemented:
+/// - `oɯ` → `oː`  (おう)
+/// - `oo` → `oː`  (おお)
+/// - `ɯɯ` → `ɯː` (うう)
+/// - `ee` → `eː`  (ええ)
+/// - `ei` → `eː`  (えい)
+/// - `aa` → `aː`  (ああ)
+/// - `ii` → `iː`  (いい)
+///
+/// Note: `ɯ` is a 2-byte UTF-8 character (U+026F), so this function works
+/// on `char`s rather than raw bytes.
+fn collapse_ipa_long_vowels(ipa: &str) -> String {
+    let chars: Vec<char> = ipa.chars().collect();
+    let mut out = String::with_capacity(ipa.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if i + 1 < chars.len() {
+            let n = chars[i + 1];
+            let collapsed: Option<&str> = match (c, n) {
+                ('o', 'ɯ' | 'o') => Some("oː"),
+                ('ɯ', 'ɯ') => Some("ɯː"),
+                ('e', 'e' | 'i') => Some("eː"),
+                ('a', 'a') => Some("aː"),
+                ('i', 'i') => Some("iː"),
+                _ => None,
+            };
+            if let Some(long) = collapsed {
+                out.push_str(long);
+                i += 2;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
+/// Collapse adjacent X-SAMPA vowel pairs into long vowels (post-pass).
+///
+/// X-SAMPA long-vowel conventions (`:` colon):
+/// - `oM` → `o:` (おう)
+/// - `oo` → `o:` (おお)
+/// - `MM` → `M:` (うう)
+/// - `ee` → `e:` (ええ)
+/// - `ei` → `e:` (えい)
+/// - `aa` → `a:` (ああ)
+/// - `ii` → `i:` (いい)
+fn collapse_xsampa_long_vowels(xsampa: &str) -> String {
+    let chars: Vec<char> = xsampa.chars().collect();
+    let mut out = String::with_capacity(xsampa.len());
+    let mut i = 0;
+    while i < chars.len() {
+        let c = chars[i];
+        if i + 1 < chars.len() {
+            let n = chars[i + 1];
+            let collapsed: Option<&str> = match (c, n) {
+                ('o', 'M' | 'o') => Some("o:"),
+                ('M', 'M') => Some("M:"),
+                ('e', 'e' | 'i') => Some("e:"),
+                ('a', 'a') => Some("a:"),
+                ('i', 'i') => Some("i:"),
+                _ => None,
+            };
+            if let Some(long) = collapsed {
+                out.push_str(long);
+                i += 2;
+                continue;
+            }
+        }
+        out.push(c);
+        i += 1;
+    }
+    out
+}
+
 /// Convert kana to IPA (International Phonetic Alphabet)
 pub fn to_ipa(text: &str) -> String {
     let hiragana = to_hiragana(text);
@@ -127,7 +206,8 @@ pub fn to_ipa(text: &str) -> String {
         }
     }
 
-    result
+    // Post-pass: collapse adjacent vowel pairs into long vowels
+    collapse_ipa_long_vowels(&result)
 }
 
 /// Convert kana to X-SAMPA (phonetic transcription)
@@ -169,7 +249,8 @@ pub fn to_xsampa(text: &str) -> String {
         }
     }
 
-    result
+    // Post-pass: collapse adjacent vowel pairs into long vowels
+    collapse_xsampa_long_vowels(&result)
 }
 
 #[allow(clippy::too_many_lines)]
@@ -561,9 +642,40 @@ mod tests {
     #[test]
     fn test_ipa_tokyo() {
         // トウキョウ → とうきょう → toːkʲoː
+        // と→to, う→ɯ (collapsed with o → oː), きょ→kʲo, う→ɯ (collapsed with o → oː)
         let ipa = to_ipa("とうきょう");
-        assert!(ipa.contains("to"));
-        assert!(ipa.contains("kʲo")); // Palatalized k
+        assert_eq!(ipa, "toːkʲoː");
+    }
+
+    #[test]
+    fn test_ipa_long_vowel_ou() {
+        // おう → oɯ → collapsed → oː
+        assert_eq!(to_ipa("おう"), "oː");
+    }
+
+    #[test]
+    fn test_ipa_long_vowel_uu() {
+        // うう → ɯɯ → collapsed → ɯː
+        assert_eq!(to_ipa("うう"), "ɯː");
+    }
+
+    #[test]
+    fn test_ipa_long_vowel_ei() {
+        // えい → ei → collapsed → eː
+        assert_eq!(to_ipa("えい"), "eː");
+    }
+
+    #[test]
+    fn test_ipa_long_vowel_aa() {
+        // ああ → aa → collapsed → aː
+        assert_eq!(to_ipa("ああ"), "aː");
+    }
+
+    #[test]
+    fn test_ipa_long_vowel_mixed() {
+        // おうさま → oː + sa + ma
+        let ipa = to_ipa("おうさま");
+        assert_eq!(ipa, "oːsama");
     }
 
     #[test]

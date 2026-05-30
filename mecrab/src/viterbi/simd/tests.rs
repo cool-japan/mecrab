@@ -316,6 +316,143 @@ fn test_batch_connection_costs_non_sequential() {
     assert_eq!(out[4], 200i32); // row[1]
 }
 
+// ── batch_min_argmin_i64 ─────────────────────────────────────────────────
+
+/// Helper: compute expected result via the scalar reference, then compare
+/// against the platform-dispatch version.
+fn check_batch_min_argmin_i64(prev: &[i64], conn: &[i32], wcost: i64, best_so_far: i64) {
+    let expected = scalar_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far);
+    let actual = batch_min_argmin_i64(prev, conn, wcost, best_so_far);
+
+    match (expected, actual) {
+        (None, None) => {}
+        (Some((ei, ev)), Some((ai, av))) => {
+            assert_eq!(
+                ev, av,
+                "value mismatch: scalar={ev} dispatch={av} (prev={prev:?}, conn={conn:?}, \
+                 wcost={wcost}, best_so_far={best_so_far})"
+            );
+            // Both indices must point to the same total cost (there may be ties).
+            let expected_sum = prev[ei] + conn[ei] as i64 + wcost;
+            let actual_sum = prev[ai] + conn[ai] as i64 + wcost;
+            assert_eq!(
+                expected_sum, actual_sum,
+                "index mismatch produces different sums: scalar_idx={ei} dispatch_idx={ai}"
+            );
+        }
+        (expected, actual) => panic!(
+            "None/Some mismatch: scalar={expected:?} dispatch={actual:?} \
+             (prev={prev:?}, conn={conn:?}, wcost={wcost}, best_so_far={best_so_far})"
+        ),
+    }
+}
+
+/// Basic correctness: minimum at a known index with wcost = 0.
+#[test]
+fn test_batch_min_argmin_i64_basic() {
+    let prev: Vec<i64> = vec![100, 200, 50, 300, 150];
+    let conn: Vec<i32> = vec![10, 5, 3, 8, 1];
+    // Sums: 110, 205, 53, 308, 151 → min = 53 at index 2 (+ wcost 0)
+    check_batch_min_argmin_i64(&prev, &conn, 0, i64::MAX);
+}
+
+/// Positive wcost shifts all totals but does not change the argmin.
+#[test]
+fn test_batch_min_argmin_i64_positive_wcost() {
+    let prev: Vec<i64> = vec![100, 200, 50, 300];
+    let conn: Vec<i32> = vec![10, 5, 3, 8];
+    for wcost in [1_i64, 100, 1000, 32_000] {
+        check_batch_min_argmin_i64(&prev, &conn, wcost, i64::MAX);
+    }
+}
+
+/// Negative wcost (common in Japanese morphology dictionaries).
+#[test]
+fn test_batch_min_argmin_i64_negative_wcost() {
+    let prev: Vec<i64> = vec![500, 300, 800, 100];
+    let conn: Vec<i32> = vec![50, 10, -200, 5];
+    for wcost in [-100_i64, -32_000, -1] {
+        check_batch_min_argmin_i64(&prev, &conn, wcost, i64::MAX);
+    }
+}
+
+/// best_so_far guard: no improvement → None.
+#[test]
+fn test_batch_min_argmin_i64_no_improvement() {
+    let prev: Vec<i64> = vec![100, 200, 50];
+    let conn: Vec<i32> = vec![10, 5, 3];
+    // min total = 53; best_so_far = 53 means we require *strictly* better.
+    let result = batch_min_argmin_i64(&prev, &conn, 0, 53);
+    assert_eq!(result, None, "should return None when min == best_so_far");
+
+    // best_so_far = 52 → also no improvement.
+    let result2 = batch_min_argmin_i64(&prev, &conn, 0, 52);
+    assert_eq!(result2, None, "should return None when min > best_so_far");
+}
+
+/// Empty slice returns None.
+#[test]
+fn test_batch_min_argmin_i64_empty() {
+    let prev: Vec<i64> = vec![];
+    let conn: Vec<i32> = vec![];
+    assert_eq!(batch_min_argmin_i64(&prev, &conn, 0, i64::MAX), None);
+}
+
+/// Single-element slice.
+#[test]
+fn test_batch_min_argmin_i64_single() {
+    let prev = vec![42_i64];
+    let conn = vec![8_i32];
+    // total = 42 + 8 + 5 = 55
+    let result = batch_min_argmin_i64(&prev, &conn, 5, i64::MAX);
+    assert_eq!(result, Some((0, 55)));
+}
+
+/// Larger slice exercising SIMD lanes (> 4 elements for AVX2, > 2 for SSE/NEON).
+#[test]
+fn test_batch_min_argmin_i64_larger_slice() {
+    let prev: Vec<i64> = vec![1000, 2000, 3000, 4000, 500, 6000, 7000, 8000, 9000, 10_000];
+    let conn: Vec<i32> = vec![50, 100, -100, 200, 10, 300, 400, 500, -50, 600];
+    // index 4: 500 + 10 = 510; index 2: 3000 - 100 = 2900; check index 4 wins
+    check_batch_min_argmin_i64(&prev, &conn, 0, i64::MAX);
+    check_batch_min_argmin_i64(&prev, &conn, -200, i64::MAX);
+}
+
+/// Negative previous costs (accumulated costs can be negative with very cheap nodes).
+#[test]
+fn test_batch_min_argmin_i64_negative_prev() {
+    let prev: Vec<i64> = vec![-5000, -3000, -1000, -8000, -100];
+    let conn: Vec<i32> = vec![100, 200, 300, 50, 10];
+    check_batch_min_argmin_i64(&prev, &conn, 0, i64::MAX);
+    check_batch_min_argmin_i64(&prev, &conn, 5000, i64::MAX);
+    check_batch_min_argmin_i64(&prev, &conn, -5000, i64::MAX);
+}
+
+/// Exactly 4 elements (AVX2 boundary) and 2 elements (SSE4.1/NEON boundary).
+#[test]
+fn test_batch_min_argmin_i64_boundary_sizes() {
+    for &n in &[1_usize, 2, 3, 4, 5, 7, 8, 9, 15, 16] {
+        let prev: Vec<i64> = (0..n as i64).map(|i| (n as i64 - i) * 100).collect();
+        let conn: Vec<i32> = (0..n as i32).map(|i| i * 3 - 10).collect();
+        check_batch_min_argmin_i64(&prev, &conn, 0, i64::MAX);
+        check_batch_min_argmin_i64(&prev, &conn, -99, i64::MAX);
+    }
+}
+
+/// Scalar reference agrees with itself (sanity check).
+#[test]
+fn test_scalar_batch_min_argmin_i64_reference() {
+    let prev: Vec<i64> = vec![10, 20, 5, 15, 8];
+    let conn: Vec<i32> = vec![2, 1, 1, 3, 10];
+    // Sums: 12, 21, 6, 18, 18 → min = 6 at index 2
+    let result = scalar_impl::batch_min_argmin_i64(&prev, &conn, 0, i64::MAX);
+    assert_eq!(result, Some((2, 6)));
+
+    // With wcost = 100: all totals + 100; min = 106 at index 2
+    let result2 = scalar_impl::batch_min_argmin_i64(&prev, &conn, 100, i64::MAX);
+    assert_eq!(result2, Some((2, 106)));
+}
+
 // ── SimdStats ────────────────────────────────────────────────────────────
 
 #[test]

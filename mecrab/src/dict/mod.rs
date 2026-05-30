@@ -7,7 +7,6 @@
 //!
 //! Reference: ../ref/mecab-0.996/src/dictionary.cpp
 
-mod cached_matrix;
 mod char_def;
 mod connection_matrix;
 mod double_array_trie;
@@ -18,8 +17,7 @@ mod sys_dic;
 mod unknown;
 pub mod user_dict;
 
-pub use cached_matrix::CachedMatrix;
-pub use char_def::{CharCategory, CharDef, CharDefCached, CharInfo};
+pub use char_def::{CharCategory, CharDef, CharInfo};
 pub use connection_matrix::ConnectionMatrix;
 pub use double_array_trie::{DartsResult, DoubleArrayTrie};
 pub use feature::FeatureTable;

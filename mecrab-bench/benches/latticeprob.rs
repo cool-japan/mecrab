@@ -12,15 +12,16 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use mecrab::MeCrab;
 use std::hint::black_box;
 
-fn load_mecrab() -> Option<MeCrab> {
-    MeCrab::builder().build().ok()
+fn load_mecrab() -> MeCrab {
+    MeCrab::builder().build().unwrap_or_else(|_| {
+        mecrab_builder::synthetic::build_synthetic_dictionary()
+            .into_mecrab()
+            .expect("synthetic dictionary must always load")
+    })
 }
 
 fn bench_viterbi_vs_forward_backward(c: &mut Criterion) {
-    let Some(mecrab) = load_mecrab() else {
-        eprintln!("Skipping latticeprob benchmarks: no MeCab dictionary installed");
-        return;
-    };
+    let mecrab = load_mecrab();
 
     let texts = [
         ("short", "東京は日本の首都です"),
@@ -52,10 +53,7 @@ fn bench_viterbi_vs_forward_backward(c: &mut Criterion) {
 }
 
 fn bench_output_formats(c: &mut Criterion) {
-    let Some(mecrab) = load_mecrab() else {
-        eprintln!("Skipping output_formats benchmarks: no MeCab dictionary installed");
-        return;
-    };
+    let mecrab = load_mecrab();
 
     let text = "日本語の形態素解析エンジンMeCrabは高速で正確な解析を提供します";
 
@@ -81,10 +79,7 @@ fn bench_output_formats(c: &mut Criterion) {
 }
 
 fn bench_forward_backward_scaling(c: &mut Criterion) {
-    let Some(mecrab) = load_mecrab() else {
-        eprintln!("Skipping forward_backward_scaling benchmarks: no MeCab dictionary installed");
-        return;
-    };
+    let mecrab = load_mecrab();
 
     // Texts of increasing length to characterise O(n) scaling of forward-backward.
     let texts: &[(&str, &str)] = &[

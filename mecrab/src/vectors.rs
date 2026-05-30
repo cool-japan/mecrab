@@ -671,4 +671,127 @@ mod tests {
         let b = vec![-1.0, 0.0, 0.0];
         assert!((VectorStore::cosine_similarity(&a, &b).unwrap() + 1.0).abs() < 1e-6);
     }
+
+    #[test]
+    fn test_f16_roundtrip() {
+        // f16_to_f32(f32_to_f16(v)) ≈ v within f16 precision (~0.5% relative).
+        let cases: &[f32] = &[0.0, -0.0, 1.0, -1.0, 0.5, 1024.0, -0.001, 65504.0];
+        for &v in cases {
+            let bits = f32_to_f16(v);
+            let back = f16_to_f32(bits);
+            if v == 0.0_f32 {
+                assert!(back.abs() < f32::EPSILON, "zero roundtrip: got {back}");
+            } else {
+                let rel_err = ((back - v) / v).abs();
+                assert!(
+                    rel_err < 0.005,
+                    "f16 roundtrip: {v} → {bits:#06x} → {back}, rel_err={rel_err}"
+                );
+            }
+        }
+        // Overflow → infinity (exponent bits = 0x7C00)
+        let inf_bits = f32_to_f16(1e10_f32);
+        assert_eq!(
+            inf_bits & 0x7C00,
+            0x7C00,
+            "overflow should produce inf exponent"
+        );
+    }
+
+    #[test]
+    fn test_quantize_f16_roundtrip() {
+        let dim = 4_usize;
+        let vocab = 3_usize;
+        let vecs: Vec<f32> = vec![
+            1.0, -1.0, 0.5, 0.25, 0.0, 2.0, -2.0, 1.5, -0.5, 0.75, 0.1, -0.3,
+        ];
+        let buf = quantize_f16(&vecs, vocab, dim);
+        assert_eq!(buf.len(), 32 + vocab * dim * 2, "buffer size mismatch");
+
+        // Verify header dtype = F16
+        // Header layout: magic(0..4), vocab_size(4..8), dim(8..12), data_type(12..16)
+        let dtype = u32::from_le_bytes(buf[12..16].try_into().unwrap());
+        assert_eq!(dtype, VectorDataType::F16 as u32, "dtype should be F16");
+
+        // Spot-check each value via manual decode
+        for (i, &orig) in vecs.iter().enumerate() {
+            let byte_off = 32 + i * 2;
+            let bits = u16::from_le_bytes(buf[byte_off..byte_off + 2].try_into().unwrap());
+            let decoded = f16_to_f32(bits);
+            let rel_err = if orig == 0.0_f32 {
+                decoded.abs()
+            } else {
+                ((decoded - orig) / orig).abs()
+            };
+            assert!(
+                rel_err < 0.005,
+                "f16 quantize roundtrip [{i}]: orig={orig}, decoded={decoded}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_quantize_i8_roundtrip() {
+        let dim = 4_usize;
+        let vocab = 2_usize;
+        let vecs: Vec<f32> = vec![1.0, -1.0, 0.5, 0.25, 0.0, 2.0, -2.0, 1.5];
+        let (buf, scale) = quantize_i8(&vecs, vocab, dim);
+        assert_eq!(buf.len(), 32 + vocab * dim, "buffer size mismatch");
+
+        // Scale should be max_abs / 127.0
+        let max_abs = vecs.iter().copied().fold(0.0_f32, |m, v| m.max(v.abs()));
+        let expected_scale = max_abs / 127.0;
+        assert!(
+            (scale - expected_scale).abs() < 1e-7,
+            "scale mismatch: {scale} vs {expected_scale}"
+        );
+
+        // Header reserved[0] must contain scale bits
+        let reserved0 = u32::from_le_bytes(buf[16..20].try_into().unwrap());
+        assert_eq!(
+            reserved0,
+            scale.to_bits(),
+            "reserved[0] must contain scale bits"
+        );
+
+        // Each decoded element within one scale unit of original
+        for (i, &orig) in vecs.iter().enumerate() {
+            let byte_off = 32 + i;
+            let q = buf[byte_off] as i8;
+            let decoded = q as f32 * scale;
+            let err = (decoded - orig).abs();
+            assert!(
+                err <= scale + 1e-6,
+                "i8 quantize [{i}]: orig={orig}, q={q}, decoded={decoded}, err={err}, scale={scale}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_get_dequantized_oob_returns_none() {
+        let dim = 4_usize;
+        let vocab = 2_usize;
+        let vecs: Vec<f32> = vec![1.0, 0.5, -0.5, 0.25, 0.0, 1.0, 2.0, -1.0];
+        let buf = quantize_f16(&vecs, vocab, dim);
+
+        // Write to a temp file and load via VectorStore::from_file
+        let tmp = std::env::temp_dir().join("mecrab_test_f16_oob.mcv1");
+        std::fs::write(&tmp, &buf).unwrap();
+        let store = VectorStore::from_file(&tmp).expect("load store");
+
+        assert!(
+            store.get_dequantized(0).is_some(),
+            "word_id=0 must be present"
+        );
+        assert!(
+            store.get_dequantized(1).is_some(),
+            "word_id=1 must be present"
+        );
+        assert!(
+            store.get_dequantized(2).is_none(),
+            "word_id >= vocab_size must return None"
+        );
+
+        let _ = std::fs::remove_file(&tmp);
+    }
 }

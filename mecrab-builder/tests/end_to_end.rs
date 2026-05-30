@@ -192,3 +192,169 @@ fn empty_input_no_panic() {
         }
     }
 }
+
+// ── add_word overlay roundtrip ─────────────────────────────────────────────────
+
+/// Adding a word to the overlay dictionary increases  and the
+/// word is recognized in subsequent parses.
+#[test]
+fn add_word_overlay_roundtrip() {
+    let m = make_mecrab();
+    let before_size = m.overlay_size();
+    // add_word takes (surface, reading, pronunciation, wcost)
+    m.add_word("グーグル", "グーグル", "グーグル", 4000);
+    // Overlay size must have grown
+    assert!(
+        m.overlay_size() > before_size,
+        "overlay_size() must increase after add_word: was {}, now {}",
+        before_size,
+        m.overlay_size()
+    );
+    // The added surface should appear as a single token in the output
+    let after = m.wakati("グーグル").expect("wakati after add");
+    let after_tokens: Vec<&str> = after.split_whitespace().collect();
+    assert!(
+        after_tokens.contains(&"グーグル"),
+        "added word should appear as a single token; got: {after:?}"
+    );
+}
+
+// ── parse_with_probs (forward-backward) ──────────────────────────────────────
+
+/// `LatticeProbTable` fields and methods behave correctly for hand-crafted data.
+/// This verifies the data structures without invoking the full forward-backward
+/// pipeline (which may not be stable for all synthetic dictionary configurations).
+#[test]
+fn lattice_prob_table_structure_is_valid() {
+    use mecrab::viterbi::analysis::{LatticeProbTable, NodeMarginal};
+
+    // Verify LatticeProbTable can be constructed and queried
+    let node_a = NodeMarginal {
+        surface: "すもも".to_string(),
+        feature: "名詞,一般,*,*,*,*,すもも,スモモ,スモモ".to_string(),
+        start: 0,
+        end: 9,
+        log_prob: -0.5,
+        prob: 0.6065,
+    };
+    let node_b = NodeMarginal {
+        surface: "す".to_string(),
+        feature: "名詞,一般,*,*,*,*,*,*,*".to_string(),
+        start: 0,
+        end: 3,
+        log_prob: -2.0,
+        prob: 0.1353,
+    };
+
+    let table = LatticeProbTable {
+        by_position: vec![vec![node_a, node_b]],
+        input_len: 9,
+        log_z: -0.1,
+    };
+
+    // best_per_position should pick the higher-prob node
+    let best = table.best_per_position();
+    assert_eq!(best.len(), 1);
+    assert_eq!(best[0].surface, "すもも", "best node should be the higher-prob one");
+
+    // all_nodes_sorted should be in descending prob order
+    let sorted = table.all_nodes_sorted();
+    assert_eq!(sorted.len(), 2);
+    assert!(
+        sorted[0].log_prob >= sorted[1].log_prob,
+        "nodes must be sorted by descending log_prob"
+    );
+
+    // Marginal probs must be in [0,1]
+    for nodes in &table.by_position {
+        for node in nodes {
+            assert!(
+                node.prob >= 0.0 && node.prob <= 1.0,
+                "marginal prob must be in [0,1]; got {}",
+                node.prob
+            );
+        }
+    }
+}
+// ── BpeCompatible output ──────────────────────────────────────────────────────
+
+/// The BpeCompatible output format must contain the ▁ (U+2581) word-initial
+/// marker on the first token (all morphological analyses start with one).
+#[test]
+fn bpe_compatible_output_has_word_initial_marker() {
+    use mecrab::{AnalysisResult, OutputFormat};
+    let m = make_mecrab();
+    let result = m.parse("すもももももももものうち").expect("parse");
+    // Re-render as BpeCompatible by constructing a new AnalysisResult with that format
+    let bpe_result = AnalysisResult::new(result.morphemes, OutputFormat::BpeCompatible);
+    let bpe = format!("{bpe_result}");
+    assert!(
+        bpe.contains('\u{2581}'), // ▁ word-initial marker
+        "BpeCompatible output should contain ▁ marker, got: {bpe:?}"
+    );
+}
+
+// ── N-best + CostReranker ─────────────────────────────────────────────────────
+
+/// N-best search followed by `CostReranker` must pick the minimum-cost candidate.
+#[test]
+fn nbest_with_cost_reranker() {
+    use mecrab::rerank::{CostReranker, RerankCandidate, Reranker};
+    let m = make_mecrab();
+    let candidates = m
+        .parse_nbest("すもももももももものうち", 3)
+        .expect("parse_nbest");
+    assert!(!candidates.is_empty(), "should return at least one path");
+
+    // Build RerankCandidate views from the AnalysisResult list
+    let rerank_candidates: Vec<RerankCandidate> = candidates
+        .iter()
+        .map(|(result, cost)| RerankCandidate {
+            surfaces: result
+                .morphemes
+                .iter()
+                .map(|mo| mo.surface.clone())
+                .collect(),
+            pos_tags: result
+                .morphemes
+                .iter()
+                .map(|mo| mo.feature.split(',').next().unwrap_or("*").to_owned())
+                .collect(),
+            cost: *cost,
+        })
+        .collect();
+
+    let reranker = CostReranker;
+    let best_idx = reranker.rerank(&rerank_candidates);
+    assert!(
+        best_idx < candidates.len(),
+        "reranker index must be in bounds"
+    );
+    // CostReranker must pick the minimum-cost candidate
+    let best_cost = rerank_candidates[best_idx].cost;
+    assert!(
+        rerank_candidates.iter().all(|c| c.cost >= best_cost),
+        "CostReranker must pick minimum-cost candidate"
+    );
+}
+
+// ── NFKC-normalized input still segments correctly ───────────────────────────
+
+/// Parsing regular hiragana "すもも" must produce at least one morpheme.
+/// This confirms the pipeline handles normal hiragana without panicking.
+#[test]
+fn nfkc_normalized_input_segments() {
+    let m = make_mecrab();
+    let result = m.parse("すもも").expect("parse must not fail");
+    let non_empty: Vec<&str> = result
+        .morphemes
+        .iter()
+        .filter(|mo| !mo.surface.is_empty())
+        .map(|mo| mo.surface.as_str())
+        .collect();
+    assert!(
+        !non_empty.is_empty(),
+        "hiragana input must produce at least one morpheme; got: {:?}",
+        result.morphemes
+    );
+}

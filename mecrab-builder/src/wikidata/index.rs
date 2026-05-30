@@ -17,10 +17,22 @@ use crate::BuildError;
 ///
 /// Internally uses `HashMap<surface, HashMap<uri, max_confidence>>` to
 /// guarantee O(1) deduplication with max-confidence semantics.
+///
+/// Entity-type data (P31 "instance of" Q-IDs per URI) is stored separately
+/// so that [`WikidataProcessor`] can apply POS-based type filtering at
+/// merge time even when the dump-level `entity_type_filter` was not set.
 #[derive(Debug, Default)]
 pub struct WikidataIndex {
     /// Surface form → (URI → max_confidence)
     pub(super) entries: HashMap<String, HashMap<String, f32>>,
+    /// URI → P31 entity-type Q-IDs (e.g. ["Q5", "Q215380"]).
+    ///
+    /// This map is populated during dump parsing (Phase 1).  It is keyed by
+    /// full URI (`http://www.wikidata.org/entity/Qxxx`) for consistency with
+    /// the surface→URI entries above.  Entries may be absent for URIs sourced
+    /// from Wikipedia/DBpedia or from indexes serialised before P31 storage
+    /// was introduced.
+    pub(super) entity_type_map: HashMap<String, Vec<String>>,
 }
 
 impl WikidataIndex {
@@ -36,6 +48,33 @@ impl WikidataIndex {
             .entry(uri.to_string())
             .and_modify(|c| *c = c.max(confidence))
             .or_insert(confidence);
+    }
+
+    /// Store the P31 "instance of" entity-type Q-IDs for a URI.
+    ///
+    /// Called during dump parsing for every entry whose type list is non-empty.
+    /// Existing types for the same URI are replaced (last write wins; in
+    /// practice each URI appears only once in a dump).
+    pub fn add_entity_types(&mut self, uri: &str, types: Vec<String>) {
+        if !types.is_empty() {
+            self.entity_type_map.insert(uri.to_string(), types);
+        }
+    }
+
+    /// Return the P31 entity-type Q-IDs stored for `uri`, or an empty slice
+    /// when no data is available.
+    ///
+    /// When the returned slice is empty the caller MUST treat the URI as
+    /// passing any type filter (conservative / backward-compatible behaviour):
+    ///
+    /// ```text
+    /// // entity_types empty (index predates P31 storage): allow through
+    /// ```
+    pub fn entity_types_for(&self, uri: &str) -> &[String] {
+        self.entity_type_map
+            .get(uri)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
     }
 
     /// Look up URIs for a surface form, sorted by confidence descending
@@ -154,6 +193,13 @@ impl WikidataIndex {
                     .and_modify(|c| *c = c.max(confidence))
                     .or_insert(confidence);
             }
+        }
+        // Merge entity-type data (last-write-wins per URI is fine — each URI
+        // appears in at most one Wikidata dump)
+        for (uri, types) in &other.entity_type_map {
+            self.entity_type_map
+                .entry(uri.clone())
+                .or_insert_with(|| types.clone());
         }
     }
 

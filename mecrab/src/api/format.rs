@@ -382,15 +382,25 @@ fn ipadic_xpos(features: &[&str]) -> String {
 /// - 接続詞 (conjunction): attaches to right neighbor (`cc`)
 /// - 記号 (punctuation): attaches to root (`punct`)
 /// - 感動詞 (interjection): attaches to root (`discourse`)
-/// - 名詞 (noun): before root → `nsubj`; after root → `obj`
+/// - 名詞 (noun): determined by the immediately following case particle surface:
+///   - が → `nsubj` (nominative subject)
+///   - を → `obj`   (accusative object)
+///   - に/へ/で/から/まで → `obl` (oblique)
+///   - の → `nmod`  (genitive modifier; attaches to next noun rather than root)
+///   - no particle → positional fallback (before root → `nsubj`, else `obj`)
 /// - Other verbs (non-root): `ccomp`
 /// - Everything else: `dep`
+///
+/// # Token tuple layout
+///
+/// Each element of `tokens` is `(token_id_1based, pos, pos_detail1, surface)`.
+/// The surface field is used only for case-particle lookahead on nouns.
 ///
 /// Returns a `Vec<(usize, &'static str)>` parallel to `tokens`:
 /// each entry is `(head_id_1based, deprel)` where `head_id=0` means root.
 #[allow(dead_code)]
 fn compute_heuristic_deps(
-    tokens: &[(usize, &str, &str)], // (token_id_1based, pos, pos_detail1)
+    tokens: &[(usize, &str, &str, &str)], // (token_id_1based, pos, pos_detail1, surface)
 ) -> Vec<(usize, &'static str)> {
     let n = tokens.len();
     if n == 0 {
@@ -404,15 +414,15 @@ fn compute_heuristic_deps(
         // Fallback: last non-punctuation token
         let verb_pos = tokens
             .iter()
-            .rposition(|(_, pos, _)| pos.starts_with("動詞"));
+            .rposition(|(_, pos, _, _)| pos.starts_with("動詞"));
         let aux_pos = tokens
             .iter()
-            .rposition(|(_, pos, _)| pos.starts_with("助動詞"));
+            .rposition(|(_, pos, _, _)| pos.starts_with("助動詞"));
         // prefer verb over aux; both over fallback
         verb_pos.or(aux_pos).unwrap_or_else(|| {
             tokens
                 .iter()
-                .rposition(|(_, pos, _)| !pos.starts_with("記号"))
+                .rposition(|(_, pos, _, _)| !pos.starts_with("記号"))
                 .unwrap_or(n - 1)
         })
     };
@@ -422,7 +432,7 @@ fn compute_heuristic_deps(
     tokens
         .iter()
         .enumerate()
-        .map(|(i, (token_id, pos, _pos_detail1))| {
+        .map(|(i, (token_id, pos, _pos_detail1, _surface))| {
             let tid = *token_id;
             if tid == root_id {
                 return (0usize, "root");
@@ -449,7 +459,10 @@ fn compute_heuristic_deps(
 
             if pos.starts_with("接続詞") {
                 // Conjunctions attach to the next content token
-                let head = tokens.get(i + 1).map(|(id, _, _)| *id).unwrap_or(root_id);
+                let head = tokens
+                    .get(i + 1)
+                    .map(|(id, _, _, _)| *id)
+                    .unwrap_or(root_id);
                 return (head, "cc");
             }
 
@@ -461,15 +474,49 @@ fn compute_heuristic_deps(
                 // Adjectives modify the next noun if possible
                 let next_noun = tokens[i + 1..]
                     .iter()
-                    .find(|(_, p, _)| p.starts_with("名詞"))
-                    .map(|(id, _, _)| *id);
+                    .find(|(_, p, _, _)| p.starts_with("名詞"))
+                    .map(|(id, _, _, _)| *id);
                 return (next_noun.unwrap_or(root_id), "amod");
             }
 
             if pos.starts_with("名詞") {
-                // Before root: subject; after or at root position: object
-                let deprel = if tid < root_id { "nsubj" } else { "obj" };
-                return (root_id, deprel);
+                // Find the immediately following case particle, skipping
+                // punctuation tokens.  We look at the next token's POS; if it
+                // is a particle we inspect its surface to determine the
+                // grammatical relation of the noun.
+                let following_particle: Option<&str> = tokens[i + 1..]
+                    .iter()
+                    .find(|(_, p, _, _)| p.starts_with("助詞") || p.starts_with("記号"))
+                    .and_then(|(_, p, _, surf)| {
+                        if p.starts_with("助詞") {
+                            Some(*surf)
+                        } else {
+                            None // punctuation — no case particle found
+                        }
+                    });
+
+                let deprel: &'static str = match following_particle {
+                    Some("が") => "nsubj",
+                    Some("を") => "obj",
+                    Some("に" | "へ" | "で" | "から" | "まで") => "obl",
+                    Some("の") => "nmod",
+                    // Positional fallback when no case particle is present
+                    _ if tid < root_id => "nsubj",
+                    _ => "obj",
+                };
+
+                // For genitive "の": attach to the next noun rather than root
+                let head = if following_particle == Some("の") {
+                    tokens[i + 1..]
+                        .iter()
+                        .find(|(_, p, _, _)| p.starts_with("名詞"))
+                        .map(|(id, _, _, _)| *id)
+                        .unwrap_or(root_id)
+                } else {
+                    root_id
+                };
+
+                return (head, deprel);
             }
 
             if pos.starts_with("動詞") {
@@ -505,15 +552,16 @@ impl AnalysisResult {
         writeln!(f, "# sent_id = 1")?;
         writeln!(f, "# text = {text}")?;
 
-        // Collect (token_id, pos, pos_detail1) for dependency computation.
-        let dep_inputs: Vec<(usize, &str, &str)> = tokens
+        // Collect (token_id, pos, pos_detail1, surface) for dependency computation.
+        // The surface field enables case-particle lookahead for accurate noun labeling.
+        let dep_inputs: Vec<(usize, &str, &str, &str)> = tokens
             .iter()
             .enumerate()
             .map(|(i, m)| {
                 let raw = m.feature.split(',').collect::<Vec<_>>();
                 let pos = raw.first().copied().unwrap_or("*");
                 let pos_d1 = raw.get(1).copied().unwrap_or("*");
-                (i + 1, pos, pos_d1)
+                (i + 1, pos, pos_d1, m.surface.as_str())
             })
             .collect();
         let deps = compute_heuristic_deps(&dep_inputs);
@@ -857,15 +905,24 @@ mod tests {
 
     #[test]
     fn test_heuristic_deps_root_detection() {
-        // Simple case: last token is a verb (動詞) → root
-        let tokens = vec![(1, "名詞", "*"), (2, "助詞", "格助詞"), (3, "動詞", "*")];
+        // Simple case: last token is a verb (動詞) → root.
+        // 名詞 "誰か" followed by が → nsubj via particle lookahead.
+        let tokens = vec![
+            (1, "名詞", "*", "誰か"),
+            (2, "助詞", "格助詞", "が"),
+            (3, "動詞", "*", "走る"),
+        ];
         let deps = compute_heuristic_deps(&tokens);
         // token 3 (動詞) should be root
         assert_eq!(deps[2], (0, "root"), "動詞 should be root");
         // token 2 (助詞) should attach to token 1 (left neighbor)
         assert_eq!(deps[1], (1, "case"), "助詞 should attach left");
-        // token 1 (名詞, before root) should be nsubj
-        assert_eq!(deps[0], (3, "nsubj"), "名詞 before root should be nsubj");
+        // token 1 (名詞 followed by が) should be nsubj via particle lookahead
+        assert_eq!(
+            deps[0],
+            (3, "nsubj"),
+            "名詞 followed by が must be nsubj (particle lookahead)"
+        );
     }
 
     #[test]
@@ -876,9 +933,92 @@ mod tests {
 
     #[test]
     fn test_heuristic_deps_single_token() {
-        let tokens = vec![(1, "名詞", "*")];
+        let tokens = vec![(1, "名詞", "*", "テスト")];
         let deps = compute_heuristic_deps(&tokens);
         // single token is always root
         assert_eq!(deps[0], (0, "root"));
+    }
+
+    /// Fix 2: case-particle lookahead assigns correct deprel based on surface.
+    ///
+    /// Sentence structure simulated:
+    ///   太郎が  (nsubj)  花子を  (obj)  公園で  (obl)  会った (root=verb)
+    #[test]
+    fn test_conllu_case_particle_labeling() {
+        // Build a synthetic AnalysisResult:
+        //   太郎 (名詞固有名詞) が (助詞格助詞) 花子 (名詞固有名詞) を (助詞格助詞)
+        //   公園 (名詞一般)      で (助詞格助詞) 会っ (動詞) た (助動詞)
+        let morphemes = vec![
+            make_morpheme("太郎", "名詞,固有名詞,人名,一般,*,*,太郎,タロウ,タロウ"),
+            make_morpheme("が", "助詞,格助詞,一般,*,*,*,が,ガ,ガ"),
+            make_morpheme("花子", "名詞,固有名詞,人名,一般,*,*,花子,ハナコ,ハナコ"),
+            make_morpheme("を", "助詞,格助詞,一般,*,*,*,を,ヲ,ヲ"),
+            make_morpheme("公園", "名詞,一般,*,*,*,*,公園,コウエン,コウエン"),
+            make_morpheme("で", "助詞,格助詞,一般,*,*,*,で,デ,デ"),
+            make_morpheme("会っ", "動詞,自立,*,*,五段・ワ行促音便,連用タ接続,会う,アッ,アッ"),
+            make_morpheme("た", "助動詞,*,*,*,特殊・タ,基本形,た,タ,タ"),
+        ];
+        let result = AnalysisResult {
+            morphemes,
+            format: OutputFormat::ConllU,
+        };
+
+        let output = format!("{result}");
+
+        // Exercise compute_heuristic_deps directly with surface-aware tuples.
+        let tokens: Vec<(usize, &str, &str, &str)> = vec![
+            (1, "名詞", "固有名詞", "太郎"),
+            (2, "助詞", "格助詞", "が"),
+            (3, "名詞", "固有名詞", "花子"),
+            (4, "助詞", "格助詞", "を"),
+            (5, "名詞", "一般", "公園"),
+            (6, "助詞", "格助詞", "で"),
+            (7, "動詞", "自立", "会っ"),
+            (8, "助動詞", "*", "た"),
+        ];
+        let deps = compute_heuristic_deps(&tokens);
+
+        // 動詞 (token 7) is root
+        assert_eq!(deps[6], (0, "root"), "動詞 must be root");
+
+        // 太郎 followed by が → nsubj
+        assert_eq!(
+            deps[0],
+            (7, "nsubj"),
+            "太郎+が must be nsubj (nominative particle)"
+        );
+
+        // 花子 followed by を → obj
+        assert_eq!(
+            deps[2],
+            (7, "obj"),
+            "花子+を must be obj (accusative particle)"
+        );
+
+        // 公園 followed by で → obl
+        assert_eq!(
+            deps[4],
+            (7, "obl"),
+            "公園+で must be obl (oblique particle)"
+        );
+
+        // CoNLL-U output must contain the correct deprel labels
+        assert!(
+            output.contains("nsubj"),
+            "CoNLL-U output must contain nsubj"
+        );
+        assert!(output.contains("obj"), "CoNLL-U output must contain obj");
+
+        // All 8 token lines must be present
+        let token_line_count = output
+            .lines()
+            .filter(|l| !l.starts_with('#') && !l.is_empty())
+            .count();
+        assert_eq!(
+            token_line_count,
+            8,
+            "expected 8 token lines, got {}",
+            token_line_count
+        );
     }
 }

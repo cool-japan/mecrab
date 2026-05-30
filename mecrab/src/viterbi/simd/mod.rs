@@ -32,6 +32,8 @@ pub mod x86;
 use neon::neon_gather;
 #[cfg(target_arch = "aarch64")]
 pub use neon::neon_impl;
+#[cfg(target_arch = "aarch64")]
+use neon::neon_i64;
 
 #[cfg(target_arch = "x86_64")]
 use x86::x86_gather;
@@ -199,6 +201,47 @@ pub fn find_best_predecessor(prev_costs: &[i32], connection_costs: &[i16]) -> Op
     )))]
     {
         scalar_impl::find_best_predecessor(prev_costs, connection_costs)
+    }
+}
+
+/// SIMD-accelerated minimum argmin: `argmin_i(prev[i] + conn[i]) + wcost`.
+///
+/// Returns `Some((index, min_total))` where `min_total` includes `wcost`, but
+/// **only** when `min_total < best_so_far`.  Returns `None` if the slice is
+/// empty or no candidate beats `best_so_far`.
+///
+/// ## Platform dispatch
+///
+/// - **aarch64** (NEON mandatory): 2 × i64 lanes via `int64x2_t`.
+/// - **x86_64**: AVX2 (4 × i64) → SSE4.1 (2 × i64) → scalar, with runtime
+///   `is_x86_feature_detected!` for baseline builds.
+/// - **wasm32 + simd128**: scalar (no i64 wasm SIMD path yet).
+/// - **other**: scalar reference implementation.
+#[inline]
+pub fn batch_min_argmin_i64(
+    prev: &[i64],
+    conn: &[i32],
+    wcost: i64,
+    best_so_far: i64,
+) -> Option<(usize, i64)> {
+    #[cfg(target_arch = "aarch64")]
+    {
+        // SAFETY: NEON is mandatory on all ARMv8 / Apple Silicon; no runtime check needed.
+        return unsafe {
+            neon_i64::batch_min_argmin_i64_neon(prev, conn, wcost, best_so_far)
+        };
+    }
+
+    #[cfg(not(target_arch = "aarch64"))]
+    {
+        #[cfg(target_arch = "x86_64")]
+        {
+            x86_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
+        }
+
+        // Scalar fallback: wasm32+simd128, other architectures.
+        #[cfg(not(target_arch = "x86_64"))]
+        scalar_impl::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
     }
 }
 

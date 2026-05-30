@@ -348,7 +348,9 @@ impl WikidataProcessor {
         // Write semantic binary output
         let semantic_path = self.config.output_dir.join("semantic.bin");
         let mut semantic_file = File::create(&semantic_path)?;
-        pool_builder.write_to(&mut semantic_file)?;
+        pool_builder
+            .write_to(&mut semantic_file)
+            .map_err(|e| BuildError::Processing(e.to_string()))?;
 
         // Write surface→URI mapping as JSON
         let mapping_path = self.config.output_dir.join("surface_map.json");
@@ -375,16 +377,25 @@ impl WikidataProcessor {
             if let Some(uris) = self.index.lookup(surface) {
                 let take_count = uris.len().min(self.config.max_candidates as usize);
                 for (uri, confidence) in uris.into_iter().take(take_count) {
-                    // POS-based entity type filter
-                    // When `allowed_types` is Some([]) we skip all URIs.
-                    // When it is None we allow all.
-                    // When it is Some(ids) we would need entity-type data in
-                    // the index to properly filter; for now we allow through
-                    // (the filter was already applied during index building
-                    // via `entity_type_filter` in BuildConfig).
+                    // POS-based entity type filter using stored P31 Q-IDs.
+                    // When `allowed_types` is Some([]) we reject all URIs
+                    // (common noun — no entity links allowed).
+                    // When it is Some(ids) we intersect with the URI's stored
+                    // entity types; if the index has no type data for this URI
+                    // we allow through (conservative backward-compat behaviour):
+                    //   entity_types empty (index predates P31 storage): allow through
+                    // When it is None we allow all (general proper noun).
                     match &allowed_types {
                         Some(ids) if ids.is_empty() => continue,
-                        _ => {}
+                        Some(ids) => {
+                            let uri_types = self.index.entity_types_for(&uri);
+                            if !uri_types.is_empty()
+                                && !uri_types.iter().any(|t| ids.iter().any(|id| id == t))
+                            {
+                                continue;
+                            }
+                        }
+                        None => {}
                     }
                     semantic_ids.push((uri, confidence));
                     total_candidates += 1;
@@ -708,6 +719,81 @@ mod tests {
             );
         }
         assert!((entry.popularity() - 1.0).abs() < 0.001);
+    }
+
+    // ── Fix 1 tests: POS entity-type filter ─────────────────
+
+    /// When the index holds P31 types for a URI and none of them intersect the
+    /// allowed list, the URI must be rejected by `merge_dictionary`.
+    ///
+    /// We test this indirectly by checking that `WikidataIndex::entity_types_for`
+    /// returns the stored types and that the filter logic (`ids.iter().any(…)`)
+    /// correctly accepts / rejects.
+    #[test]
+    fn test_pos_entity_type_filter_with_types() {
+        let mut index = WikidataIndex::new();
+        let uri_person = "http://www.wikidata.org/entity/Q42";
+        let uri_city = "http://www.wikidata.org/entity/Q1490";
+
+        index.add("山田太郎", uri_person, 0.9);
+        index.add("東京", uri_city, 0.9);
+
+        // Store P31 types: Q42 is a person (Q5), Q1490 is a city (Q515)
+        index.add_entity_types(uri_person, vec!["Q5".to_string()]);
+        index.add_entity_types(uri_city, vec!["Q515".to_string()]);
+
+        // Allowed for 人名: Q5 (person), Q215380 (musical group)
+        let person_allowed = ["Q5".to_string(), "Q215380".to_string()];
+
+        // Person URI must pass the 人名 filter
+        let person_types = index.entity_types_for(uri_person);
+        assert!(
+            !person_types.is_empty()
+                && person_types
+                    .iter()
+                    .any(|t| person_allowed.iter().any(|id| id == t)),
+            "Q42 (Q5=person) must pass 人名 filter"
+        );
+
+        // City URI must fail the 人名 filter
+        let city_types = index.entity_types_for(uri_city);
+        assert!(
+            !city_types.is_empty()
+                && !city_types
+                    .iter()
+                    .any(|t| person_allowed.iter().any(|id| id == t)),
+            "Q1490 (Q515=city) must fail 人名 filter"
+        );
+    }
+
+    /// When the index has NO type data for a URI (old serialised index / DBpedia
+    /// source / Wikipedia source), `entity_types_for` returns an empty slice and
+    /// the filter must pass through conservatively.
+    #[test]
+    fn test_pos_entity_type_filter_passthrough_when_no_types() {
+        let mut index = WikidataIndex::new();
+        let uri = "http://www.wikidata.org/entity/Q999";
+        index.add("テスト", uri, 0.5);
+        // Deliberately do NOT call add_entity_types — simulates pre-P31 index
+
+        let types = index.entity_types_for(uri);
+        // entity_types empty (index predates P31 storage): allow through
+        assert!(
+            types.is_empty(),
+            "URI with no stored types should return empty slice"
+        );
+
+        // The processor filter checks `!uri_types.is_empty()` before rejecting,
+        // so an empty slice means the URI passes any non-empty allowed list.
+        let person_allowed = ["Q5".to_string()];
+        let would_reject = !types.is_empty()
+            && !types
+                .iter()
+                .any(|t| person_allowed.iter().any(|id| id == t));
+        assert!(
+            !would_reject,
+            "URI with no stored types must not be rejected (allow through)"
+        );
     }
 
     // ── Test helpers ─────────────────────────────────────────

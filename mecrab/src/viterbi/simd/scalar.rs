@@ -68,3 +68,45 @@ pub fn find_best_predecessor_scalar(
 ) -> Option<(usize, i32)> {
     find_best_predecessor(prev_costs, conn_costs)
 }
+
+/// Scalar reference implementation of `batch_min_argmin_i64`.
+///
+/// Computes `argmin_i(prev[i] + conn[i]) + wcost` over a chunk of up to 16
+/// predecessors and returns `Some((index, min_total))` when the minimum total
+/// is strictly less than `best_so_far`, or `None` otherwise.
+///
+/// This is the platform-independent reference used by the dispatch layer on
+/// non-x86/non-aarch64 targets, and also called directly by tests on all
+/// platforms to provide a known-correct baseline.
+#[inline]
+pub fn batch_min_argmin_i64(
+    prev: &[i64],
+    conn: &[i32],
+    wcost: i64,
+    best_so_far: i64,
+) -> Option<(usize, i64)> {
+    let len = prev.len().min(conn.len());
+    if len == 0 {
+        return None;
+    }
+
+    let mut best_idx: usize = 0;
+    // Initialise to best_so_far so we only report an improvement.
+    let mut best_total: i64 = best_so_far;
+    let mut found = false;
+
+    for i in 0..len {
+        let total = prev[i] + conn[i] as i64 + wcost;
+        if total < best_total {
+            best_total = total;
+            best_idx = i;
+            found = true;
+        }
+    }
+
+    if found {
+        Some((best_idx, best_total))
+    } else {
+        None
+    }
+}

@@ -22,7 +22,7 @@ pub mod nbest;
 /// simd128, or a scalar fallback depending on the build target.
 pub mod simd;
 
-use simd::batch_connection_costs;
+use simd::{batch_connection_costs, batch_min_argmin_i64};
 
 pub use analysis::{
     ConnectionMatrixStats, LatticeStats, MorphemeCost, PathAnalysis, PathComparison,
@@ -320,16 +320,17 @@ impl<'a> ViterbiSolver<'a> {
                     &mut conn_buf[..chunk_len],
                 );
 
-                // Scalar min over prev_cost + conn_cost + wcost.
-                for j in 0..written {
-                    let prev_cost = cost_row[base + j];
-                    let conn_cost = conn_buf[j] as i64;
-                    let total_cost = prev_cost + conn_cost + node_wcost;
-                    if total_cost < *best_cost {
-                        *best_cost = total_cost;
-                        *best_prev = Some((base + j) as u32);
-                        *best_prev_pos = prev_pos as u32;
-                    }
+                // SIMD-accelerated argmin: prev[i] + conn[i] + node_wcost over the chunk.
+                let chunk_prev = &cost_row[base..base + written];
+                if let Some((rel_idx, total_cost)) = batch_min_argmin_i64(
+                    chunk_prev,
+                    &conn_buf[..written],
+                    node_wcost,
+                    *best_cost,
+                ) {
+                    *best_cost = total_cost;
+                    *best_prev = Some((base + rel_idx) as u32);
+                    *best_prev_pos = prev_pos as u32;
                 }
 
                 base += chunk_len;

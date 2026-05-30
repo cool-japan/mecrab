@@ -146,6 +146,7 @@ fn get_dictionary_path() -> Option<&'static Path> {
 }
 
 /// Skip benchmark if dictionary not available
+#[allow(unused_macros)]
 macro_rules! require_dictionary {
     ($dict_path:expr) => {
         match $dict_path {
@@ -158,16 +159,25 @@ macro_rules! require_dictionary {
     };
 }
 
+/// Load a `MeCrab` instance using IPADIC if available, otherwise the
+/// synthetic dictionary.  This ensures all benchmarks run in CI.
+fn load_mecrab_for_bench() -> MeCrab {
+    if let Some(path) = get_dictionary_path() {
+        if let Ok(m) = MeCrab::builder().dicdir(Some(path.to_path_buf())).build() {
+            return m;
+        }
+    }
+    mecrab_builder::synthetic::build_synthetic_dictionary()
+        .into_mecrab()
+        .expect("synthetic dictionary must always load")
+}
+
 // ============================================================================
 // 1. Short Text Parsing Benchmarks (10-20 chars)
 // ============================================================================
 
 fn bench_short_text_parsing(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("short_text");
     group.warm_up_time(Duration::from_secs(1));
@@ -226,11 +236,7 @@ fn bench_short_text_parsing(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_medium_text_parsing(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("medium_text");
     group.warm_up_time(Duration::from_secs(1));
@@ -259,11 +265,7 @@ fn bench_medium_text_parsing(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_long_text_parsing(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("long_text");
     group.warm_up_time(Duration::from_secs(2));
@@ -300,11 +302,7 @@ fn bench_long_text_parsing(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_batch_parsing(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("batch");
     group.warm_up_time(Duration::from_secs(2));
@@ -394,26 +392,35 @@ fn bench_batch_parsing(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_dictionary_loading(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-
     let mut group = c.benchmark_group("dictionary_load");
     group.warm_up_time(Duration::from_secs(2));
     group.measurement_time(Duration::from_secs(10));
     group.sample_size(20);
 
-    // Cold load (measures full mmap + parsing)
-    group.bench_function("cold_load", |b| {
-        b.iter(|| Dictionary::load(black_box(dict_path)))
-    });
+    if let Some(dict_path) = get_dictionary_path() {
+        // Cold load (measures full mmap + parsing)
+        group.bench_function("cold_load", |b| {
+            b.iter(|| Dictionary::load(black_box(dict_path)))
+        });
 
-    // MeCrab builder (includes dictionary loading)
-    group.bench_function("mecrab_builder", |b| {
-        b.iter(|| {
-            MeCrab::builder()
-                .dicdir(Some(dict_path.to_path_buf()))
-                .build()
-        })
-    });
+        // MeCrab builder (includes dictionary loading)
+        group.bench_function("mecrab_builder", |b| {
+            b.iter(|| {
+                MeCrab::builder()
+                    .dicdir(Some(dict_path.to_path_buf()))
+                    .build()
+            })
+        });
+    } else {
+        // Benchmark synthetic dictionary build when IPADIC is absent
+        group.bench_function("synthetic_build", |b| {
+            b.iter(|| {
+                mecrab_builder::synthetic::build_synthetic_dictionary()
+                    .into_mecrab()
+                    .expect("synthetic must load")
+            })
+        });
+    }
 
     group.finish();
 }
@@ -423,11 +430,7 @@ fn bench_dictionary_loading(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_nbest_search(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("nbest");
     group.warm_up_time(Duration::from_secs(1));
@@ -483,8 +486,13 @@ fn bench_nbest_search(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_lattice_vs_viterbi(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let dictionary = Arc::new(Dictionary::load(dict_path).expect("Failed to load dictionary"));
+    let dictionary = Arc::new(if let Some(path) = get_dictionary_path() {
+        Dictionary::load(path).expect("Failed to load IPADIC dictionary")
+    } else {
+        mecrab_builder::synthetic::build_synthetic_dictionary()
+            .load()
+            .expect("synthetic dictionary must always load")
+    });
 
     let mut group = c.benchmark_group("components");
     group.warm_up_time(Duration::from_secs(1));
@@ -532,11 +540,7 @@ fn bench_lattice_vs_viterbi(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_scaling_analysis(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("scaling");
     group.warm_up_time(Duration::from_secs(1));
@@ -566,11 +570,7 @@ fn bench_scaling_analysis(c: &mut Criterion) {
 // ============================================================================
 
 fn bench_cache_effects(c: &mut Criterion) {
-    let dict_path = require_dictionary!(get_dictionary_path());
-    let mecrab = MeCrab::builder()
-        .dicdir(Some(dict_path.to_path_buf()))
-        .build()
-        .expect("Failed to load dictionary");
+    let mecrab = load_mecrab_for_bench();
 
     let mut group = c.benchmark_group("cache_effects");
     group.warm_up_time(Duration::from_secs(1));

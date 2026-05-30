@@ -6,7 +6,19 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use mecrab::MeCrab;
+use mecrab_builder::synthetic::build_synthetic_dictionary;
 use std::hint::black_box;
+
+/// Load a `MeCrab` instance, preferring the real IPADIC if installed,
+/// falling back to the synthetic dictionary in CI environments.
+fn load_mecrab() -> MeCrab {
+    if let Ok(m) = MeCrab::new() {
+        return m;
+    }
+    build_synthetic_dictionary()
+        .into_mecrab()
+        .expect("synthetic dictionary must always load")
+}
 
 /// Test sentences of varying complexity
 const SHORT_TEXT: &str = "テスト";
@@ -15,7 +27,7 @@ const LONG_TEXT: &str = "東京は日本の首都であり、世界有数の大�
 const VERY_LONG_TEXT: &str = "吾輩は猫である。名前はまだ無い。どこで生れたかとんと見当がつかぬ。何でも薄暗いじめじめした所でニャーニャー泣いていた事だけは記憶している。吾輩はここで始めて人間というものを見た。";
 
 fn parse_benchmark(c: &mut Criterion) {
-    let mecrab = MeCrab::new().expect("Failed to load dictionary");
+    let mecrab = load_mecrab();
 
     let mut group = c.benchmark_group("parse");
 
@@ -55,7 +67,7 @@ fn parse_benchmark(c: &mut Criterion) {
 }
 
 fn wakati_benchmark(c: &mut Criterion) {
-    let mecrab = MeCrab::new().expect("Failed to load dictionary");
+    let mecrab = load_mecrab();
 
     let mut group = c.benchmark_group("wakati");
 
@@ -69,7 +81,7 @@ fn wakati_benchmark(c: &mut Criterion) {
 }
 
 fn batch_benchmark(c: &mut Criterion) {
-    let mecrab = MeCrab::new().expect("Failed to load dictionary");
+    let mecrab = load_mecrab();
 
     // Create batch of 100 sentences
     let batch: Vec<&str> = vec![MEDIUM_TEXT; 100];
@@ -94,7 +106,7 @@ fn batch_benchmark(c: &mut Criterion) {
 }
 
 fn large_batch_benchmark(c: &mut Criterion) {
-    let mecrab = MeCrab::new().expect("Failed to load dictionary");
+    let mecrab = load_mecrab();
 
     // Create batch of 1000 sentences
     let batch: Vec<&str> = vec![MEDIUM_TEXT; 1000];

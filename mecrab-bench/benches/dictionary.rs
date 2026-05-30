@@ -9,6 +9,18 @@ use mecrab::dict::{Dictionary, OverlayDictionary};
 use std::hint::black_box;
 use std::path::Path;
 
+/// Load a dictionary, preferring IPADIC if installed, falling back to
+/// the synthetic dictionary for CI environments.
+fn load_dict_for_bench() -> Dictionary {
+    let path = Path::new("/var/lib/mecab/dic/ipadic-utf8");
+    if path.exists() {
+        return Dictionary::load(path).expect("IPADIC load");
+    }
+    mecrab_builder::synthetic::build_synthetic_dictionary()
+        .load()
+        .expect("synthetic dict load")
+}
+
 /// Common Japanese words for benchmarking
 const LOOKUP_WORDS: &[&str] = &[
     "の",
@@ -25,24 +37,24 @@ const LOOKUP_WORDS: &[&str] = &[
 
 fn dictionary_load_benchmark(c: &mut Criterion) {
     let path = Path::new("/var/lib/mecab/dic/ipadic-utf8");
-    if !path.exists() {
-        eprintln!("IPADIC not found, skipping dictionary benchmarks");
-        return;
+    if path.exists() {
+        c.bench_function("dictionary_load", |b| {
+            b.iter(|| Dictionary::load(black_box(path)))
+        });
+    } else {
+        // Benchmark synthetic dictionary build when IPADIC is absent
+        c.bench_function("synthetic_load", |b| {
+            b.iter(|| {
+                mecrab_builder::synthetic::build_synthetic_dictionary()
+                    .load()
+                    .expect("synthetic must load")
+            })
+        });
     }
-
-    c.bench_function("dictionary_load", |b| {
-        b.iter(|| Dictionary::load(black_box(path)))
-    });
 }
 
 fn lookup_benchmark(c: &mut Criterion) {
-    let path = Path::new("/var/lib/mecab/dic/ipadic-utf8");
-    if !path.exists() {
-        eprintln!("IPADIC not found, skipping dictionary benchmarks");
-        return;
-    }
-
-    let dict = Dictionary::load(path).expect("Failed to load dictionary");
+    let dict = load_dict_for_bench();
 
     let mut group = c.benchmark_group("lookup");
 
@@ -56,13 +68,7 @@ fn lookup_benchmark(c: &mut Criterion) {
 }
 
 fn connection_cost_benchmark(c: &mut Criterion) {
-    let path = Path::new("/var/lib/mecab/dic/ipadic-utf8");
-    if !path.exists() {
-        eprintln!("IPADIC not found, skipping dictionary benchmarks");
-        return;
-    }
-
-    let dict = Dictionary::load(path).expect("Failed to load dictionary");
+    let dict = load_dict_for_bench();
 
     let mut group = c.benchmark_group("connection_cost");
     group.throughput(Throughput::Elements(1000));
@@ -80,13 +86,7 @@ fn connection_cost_benchmark(c: &mut Criterion) {
 }
 
 fn char_info_benchmark(c: &mut Criterion) {
-    let path = Path::new("/var/lib/mecab/dic/ipadic-utf8");
-    if !path.exists() {
-        eprintln!("IPADIC not found, skipping dictionary benchmarks");
-        return;
-    }
-
-    let dict = Dictionary::load(path).expect("Failed to load dictionary");
+    let dict = load_dict_for_bench();
 
     let test_chars: Vec<char> = "あいうえおアイウエオ漢字英語123ABCαβγ".chars().collect();
 

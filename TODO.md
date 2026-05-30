@@ -288,5 +288,40 @@
 - [x] `MeCrab::from_dictionary()` and `MeCrab::from_bytes()` constructors
 - [x] `build_synthetic_dictionary()` — in-memory MeCab dict (sys.dic+matrix+char+unk)
 - [x] `build_matrix_bytes`, `build_char_bytes`, `build_sysdic_bytes/build_unkdic_bytes` writers
-- [x] `mecrab-builder/tests/end_to_end.rs` — 7 E2E tests, no IPADIC required
+- [x] `mecrab-builder/tests/end_to_end.rs` — 12 E2E tests (expanded from 7), no IPADIC required
 - [x] Correct segmentation of すもももももももものうち validated end-to-end
+
+## v0.3.1 Additions (2026-05-30)
+
+### Completed
+
+#### Real-runtime SIMD Viterbi (biggest perf win)
+- [x] Runtime x86 feature detection: `is_x86_feature_detected!("avx2"|"sse4.1")` with `#[target_feature]` unsafe fns — stock `cargo build --release` now uses AVX2/SSE4.1 on capable CPUs without requiring `RUSTFLAGS=-C target-cpu=native`
+- [x] New `batch_min_argmin_i64` kernel (AVX2 4×i64, SSE4.1 2×i64, NEON, scalar) wired into `scan_predecessors` — replaces scalar accumulate+argmin in the Viterbi hot loop
+- [x] 9 SIMD correctness tests verifying bit-identical results vs. scalar reference across boundary sizes, negative costs, wcost variants
+- [x] Runtime dispatch also applied to `find_min`, `find_best_predecessor`, and `gather_widen` — all fully active on stock x86-64 builds
+
+#### Phonetic Correctness
+- [x] IPA long-vowel collapsing: おう/おお→`oː`, うう→`ɯː`, えい/ええ→`eː`, ああ→`aː`, いい→`iː`
+- [x] X-SAMPA long-vowel collapsing with `:` notation (oM/oo→`o:`, MM→`M:`, etc.)
+- [x] Fixed `test_ipa_tokyo` assertion (now correctly asserts `toːkʲoː`)
+- [x] 5 new long-vowel IPA tests added
+
+#### Semantic Correctness
+- [x] `ContextBased` disambiguation now reads `context_words` (token-overlap +0.1/word) and `topic_hints` (URI substring boost ×1.3)
+- [x] `SemanticPool` prefix table validates length ≤63 bytes before write (was silently truncating)
+- [x] Wikidata POS→entity-type filter fully implemented: P31 Q-IDs stored in `WikidataIndex` during dump parsing; processor filters URIs by type intersection
+- [x] CoNLL-U dependency heuristic uses case particles: が→`nsubj`, を→`obj`, に/へ/で→`obl`, の→`nmod` (genitive attaches to next noun)
+
+#### Test & Benchmark Coverage
+- [x] `mecrab-bench/benches/viterbi.rs` no longer panics without IPADIC — uses synthetic dict fallback
+- [x] `parsing.rs`, `latticeprob.rs`, `dictionary.rs` bench suites now run synthetically when IPADIC absent
+- [x] `latticeprob.rs` (only bench of `parse_with_probs`/forward-backward) now always runs
+- [x] F16/I8 quantization round-trip tests + IEEE-754 half-precision tests (4 new tests in vectors.rs)
+- [x] `mecrab-word2vec` trainer CPU training + GPU-fallback finite-embedding tests (was 0 tests in 752-line file)
+- [x] E2E test suite expanded: add_word/overlay, parse_with_probs, BpeCompatible ▁ markers, CostReranker, NFKC-normalized input
+
+#### Dead Code Removal
+- [x] Deleted `FeatureTable::from_bytes` (empty no-op stub — real path is `SysDic::get_feature`)
+- [x] Deleted `CachedMatrix` struct and `cached_matrix.rs` (zero constructors anywhere in production)
+- [x] Deleted `CharDefCached` struct and impl (zero constructors anywhere in production)

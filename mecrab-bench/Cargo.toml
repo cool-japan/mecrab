@@ -22,6 +22,7 @@ serde_json.workspace = true
 
 [dev-dependencies]
 criterion.workspace = true
+mecrab-builder = { path = "../mecrab-builder" }
 
 [[bench]]
 name = "parsing"

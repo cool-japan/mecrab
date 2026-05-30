@@ -288,17 +288,19 @@ impl CharDef {
     }
 }
 
-/// Number of cache slots (power of 2 for fast modulo via bit-AND)
+#[cfg(test)]
 const CHAR_CACHE_SLOTS: usize = 256;
 
-/// A single cache entry: code_point → CharInfo + valid flag
+#[cfg(test)]
 #[derive(Clone, Copy)]
 struct CharCacheEntry {
     code_point: u32,
+    #[allow(dead_code)]
     info: CharInfo,
     valid: bool,
 }
 
+#[cfg(test)]
 impl Default for CharCacheEntry {
     fn default() -> Self {
         Self {
@@ -309,107 +311,6 @@ impl Default for CharCacheEntry {
     }
 }
 
-/// `CharDef` wrapper with a direct-mapped lookup cache.
-///
-/// Slot assignment: `code_point & (CHAR_CACHE_SLOTS - 1)`.
-/// Hit rate is very high for Japanese text because:
-///   - Hiragana spans U+3041..U+3096 (only 85 distinct chars)
-///   - Katakana spans U+30A0..U+30FF (96 chars)
-///   - Most sentences use a small vocabulary of character types
-///
-/// Interior mutability via `UnsafeCell` to allow cache writes through `&self`
-/// (single-threaded use within one Viterbi solve call).
-pub struct CharDefCached {
-    inner: CharDef,
-    cache: std::cell::UnsafeCell<[CharCacheEntry; CHAR_CACHE_SLOTS]>,
-}
-
-// Safety: single-threaded use in Viterbi solver; see CachedMatrix for same pattern
-unsafe impl Send for CharDefCached {}
-unsafe impl Sync for CharDefCached {}
-
-impl CharDefCached {
-    /// Wrap a `CharDef` with a direct-mapped lookup cache.
-    pub fn new(inner: CharDef) -> Self {
-        Self {
-            inner,
-            cache: std::cell::UnsafeCell::new([CharCacheEntry::default(); CHAR_CACHE_SLOTS]),
-        }
-    }
-
-    /// Get `CharInfo` with caching.
-    ///
-    /// On a cache hit (same `code_point` in the slot), returns the cached value.
-    /// On a miss, delegates to the inner `CharDef` and stores the result.
-    #[inline]
-    pub fn get_char_info(&self, c: char) -> CharInfo {
-        let code = c as u32;
-        let slot = (code as usize) & (CHAR_CACHE_SLOTS - 1);
-
-        // Safety: single-threaded access guaranteed by design (see struct docs).
-        // The Viterbi solver creates its own instance per solve call and does not
-        // share it across threads without external synchronisation.
-        let cache = unsafe { &mut *self.cache.get() };
-        let entry = &mut cache[slot];
-
-        if entry.valid && entry.code_point == code {
-            return entry.info;
-        }
-
-        let info = self.inner.get_char_info(c);
-        *entry = CharCacheEntry {
-            code_point: code,
-            info,
-            valid: true,
-        };
-        info
-    }
-
-    /// Get `CharInfo` from a UTF-8 byte slice with caching.
-    ///
-    /// Returns `(CharInfo, consumed_bytes)`.
-    pub fn get_char_info_from_bytes(&self, bytes: &[u8]) -> (CharInfo, usize) {
-        if bytes.is_empty() {
-            return (CharInfo::default(), 0);
-        }
-        match std::str::from_utf8(bytes) {
-            Ok(s) => {
-                if let Some(c) = s.chars().next() {
-                    let len = c.len_utf8();
-                    (self.get_char_info(c), len)
-                } else {
-                    (CharInfo::default(), 0)
-                }
-            }
-            Err(_) => (CharInfo::default(), 1),
-        }
-    }
-
-    /// Access the inner `CharDef`.
-    pub fn inner(&self) -> &CharDef {
-        &self.inner
-    }
-
-    /// Invalidate the entire cache.
-    ///
-    /// Useful after a hot-swap of dictionary data so that stale entries are
-    /// not returned.
-    pub fn invalidate_cache(&self) {
-        // Safety: single-threaded invalidation; same safety invariant as get_char_info.
-        let cache = unsafe { &mut *self.cache.get() };
-        for entry in cache.iter_mut() {
-            entry.valid = false;
-        }
-    }
-}
-
-impl std::fmt::Debug for CharDefCached {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("CharDefCached")
-            .field("inner", &self.inner)
-            .finish_non_exhaustive()
-    }
-}
 
 #[cfg(test)]
 mod tests {

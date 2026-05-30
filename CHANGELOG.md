@@ -6,6 +6,26 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Real-runtime SIMD Viterbi** (`viterbi/simd/`): `is_x86_feature_detected!("avx2"|"sse4.1")` runtime dispatch so AVX2/SSE4.1 actually activate on stock `cargo build --release` without requiring `RUSTFLAGS=-C target-cpu=native`. New `batch_min_argmin_i64` kernel (4×i64 AVX2, 2×i64 SSE4.1, NEON, scalar) replaces the scalar accumulate+argmin in `scan_predecessors` — the actual Viterbi hot loop is now vectorized. 9 bit-identical correctness tests vs. scalar reference.
+- **IPA/X-SAMPA long-vowel collapsing** (`phonetic/transducer.rs`): post-pass collapses おう/おお→`oː`, うう→`ɯː`, えい/ええ→`eː`, ああ→`aː`, いい→`iː`; X-SAMPA uses `:` notation. `to_ipa("とうきょう")` now correctly returns `toːkʲoː`.
+- **`ContextBased` disambiguation now active** (`semantic/disambiguation.rs`): reads `context_words` (token-overlap scoring +0.1/match) and `topic_hints` (URI-substring boost ×1.3) — was previously a no-op.
+- **Wikidata POS→entity-type filter fully implemented** (`mecrab-builder/src/wikidata/`): P31 "instance of" Q-IDs now stored in `WikidataIndex` during dump parsing; processor's `Some(non-empty)` Q-ID filter now performs the type intersection — the carefully-curated POS-to-Q-ID tables are now live.
+- **CoNLL-U dependency heuristic uses case particles** (`api/format.rs`): が→`nsubj`, を→`obj`, に/へ/で→`obl`, の→`nmod` (genitive attaches to the following noun, not root) — was position-vs-root.
+- **Benchmark suite now runs without IPADIC** (`mecrab-bench`): `viterbi.rs` no longer panics; `parsing.rs`, `latticeprob.rs`, `dictionary.rs` fall back to `build_synthetic_dictionary()` — the forward-backward / `parse_with_probs` benchmarks now run in CI for the first time.
+- **487 tests** (was 454): +33 new — SIMD correctness (×9), IPA long-vowel (×5), ContextBased (×4), SemanticPool (×3), CoNLL-U case particles (×1), vector quantization round-trips (×4), word2vec trainer CPU+GPU-fallback (×2+1), E2E add_word/overlay/probs/BPE/reranker (×5).
+
+### Fixed
+
+- `SemanticPool::write_to` now rejects prefixes >63 bytes with a clear `Error` instead of silently truncating (potential data loss on long IRI prefixes).
+
+### Removed
+
+- Dead `FeatureTable::from_bytes` stub (zero callers; real path is `SysDic::get_feature`).
+- Dead `CachedMatrix` struct and `cached_matrix.rs` (zero constructors in production code).
+- Dead `CharDefCached` struct and impl (zero constructors in production code).
+
+---
+
 - **GPU-accelerated word2vec** (`--features gpu`): wgpu-backed skip-gram training with a hand-written WGSL compute shader; graceful CPU Hogwild! fallback when no adapter is found. `kizame vectors train --gpu` flag added. `TrainingConfig::use_gpu` field + `Word2VecBuilder::use_gpu()` API.
 - **Real NFKC normalization**: replaced hand-rolled "simplified NFKC-like" normalizer with the `unicode-normalization` crate (㌔→キロ, ①→1, combining marks, all NFC/NFD/NFKD forms).
 - **F16/I8 vector quantization**: `VectorStore::get_dequantized()` decodes half-precision and int8 vectors; `quantize_f16()` and `quantize_i8()` writers produce valid MCV1 binary files; `mean_pooling` now works for all data types.
