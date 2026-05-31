@@ -10,7 +10,8 @@
 use crate::{Error, Result};
 use byteorder::{ByteOrder, LittleEndian};
 use memmap2::Mmap;
-use std::sync::Arc;
+use std::collections::HashMap;
+use std::sync::{Arc, RwLock};
 
 use super::DictionaryEntry;
 use super::double_array_trie::{DartsResult, DoubleArrayTrie};
@@ -104,6 +105,12 @@ pub struct SysDic {
     right_size: u32,
     /// Character set (e.g., "UTF-8")
     charset: String,
+    /// Cache mapping feature_offset → Arc<str> to eliminate redundant allocations.
+    ///
+    /// Each unique feature offset (there are O(unique features) such offsets,
+    /// far fewer than O(N*K) lattice lookups) is allocated exactly once and
+    /// refcount-cloned on every subsequent access.
+    feature_cache: RwLock<HashMap<u32, Arc<str>>>,
 }
 
 // Safety: The pointers point to immutable memory-mapped data
@@ -264,6 +271,7 @@ impl SysDic {
             left_size,
             right_size,
             charset,
+            feature_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -305,6 +313,7 @@ impl SysDic {
             left_size,
             right_size,
             charset,
+            feature_cache: RwLock::new(HashMap::new()),
         })
     }
 
@@ -328,7 +337,7 @@ impl SysDic {
             for i in 0..token_count {
                 let token_idx = token_start + i;
                 if let Some(token) = self.get_token(token_idx) {
-                    let feature = self.get_feature(token).to_string();
+                    let feature = self.get_feature_arc(token);
 
                     entries.push(DictionaryEntry {
                         length: result.length,
@@ -379,6 +388,34 @@ impl SysDic {
         // Safety: We found the null terminator
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         std::str::from_utf8(slice).unwrap_or("")
+    }
+
+    /// Return a reference-counted feature string for a token.
+    ///
+    /// Each unique `feature_offset` is allocated exactly once: subsequent lookups
+    /// for the same offset return a cheap `Arc::clone` (refcount bump) instead of
+    /// a heap allocation.  This eliminates the O(N×K) `String` allocations that
+    /// occurred during lattice building (N positions × K avg matches per position).
+    ///
+    /// The implementation uses a double-checked lock pattern:
+    ///   1. Fast path — read lock: return existing Arc if present.
+    ///   2. Slow path — write lock: insert (using `entry().or_insert`) and clone.
+    fn get_feature_arc(&self, token: &Token) -> Arc<str> {
+        let offset = token.feature_offset;
+
+        // Fast path under read lock (common case once cache is warm).
+        {
+            let cache = self.feature_cache.read().unwrap_or_else(|e| e.into_inner());
+            if let Some(arc) = cache.get(&offset) {
+                return Arc::clone(arc);
+            }
+        }
+
+        // Slow path: build the Arc<str> and insert under write lock.
+        // `entry().or_insert` handles the race between the two lock acquisitions.
+        let new_arc: Arc<str> = Arc::from(self.get_feature(token));
+        let mut cache = self.feature_cache.write().unwrap_or_else(|e| e.into_inner());
+        Arc::clone(cache.entry(offset).or_insert(new_arc))
     }
 
     /// Get the charset

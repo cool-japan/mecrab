@@ -219,6 +219,15 @@ impl ConnectionMatrix {
     pub fn cost_from_row_checked(row: &[i16], right_id: u16) -> i16 {
         row.get(right_id as usize).copied().unwrap_or(i16::MAX)
     }
+
+    /// Copy all connection costs into a heap-allocated `Vec<i16>`.
+    ///
+    /// Layout matches `cost()`: `data[right_id + lsize * left_id]`.
+    pub fn to_vec(&self) -> Vec<i16> {
+        let size = self.lsize * self.rsize;
+        // Safety: matrix_ptr is valid for lsize * rsize elements
+        unsafe { std::slice::from_raw_parts(self.matrix_ptr, size).to_vec() }
+    }
 }
 
 #[cfg(test)]

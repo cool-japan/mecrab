@@ -428,7 +428,7 @@ pub fn apply_conn_gradient_update(
     learning_rate: f64,
 ) {
     for (&(right_id, left_id), &grad) in &gradient.conn_gradients {
-        let idx = right_id as usize * left_size + left_id as usize;
+        let idx = right_id as usize + left_size * left_id as usize;
         if idx < matrix.len() {
             let delta = (learning_rate * grad).round() as i64;
             let updated = matrix[idx] as i64 - delta;
@@ -647,13 +647,13 @@ mod tests {
 
     #[test]
     fn test_apply_conn_gradient_update_decreases_cost() {
-        // right_id=0, left_id=1: idx = 0*2 + 1 = 1
-        let mut matrix = vec![0i16, 100i16, 0i16, 0i16];
+        // right_id=0, left_id=1: idx = 0 + 2*1 = 2
+        let mut matrix = vec![0i16, 0i16, 100i16, 0i16];
         let mut grad = CrfGradient::new();
         // empirical > expected: gradient positive → decrease cost
         grad.add_conn(0, 1, 10.0);
         apply_conn_gradient_update(&mut matrix, 2, &grad, 0.5);
         // delta = round(0.5 * 10) = 5; 100 - 5 = 95
-        assert_eq!(matrix[1], 95i16);
+        assert_eq!(matrix[2], 95i16);
     }
 }

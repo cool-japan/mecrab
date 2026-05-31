@@ -12,6 +12,7 @@ pub use visualize::{DotBuilder, DotConfig, NodeShape, RankDir};
 
 use crate::Result;
 use crate::dict::{CharCategory, Dictionary, DictionaryEntry};
+use std::sync::Arc;
 
 // ── Constraint types ─────────────────────────────────────────────────────────
 
@@ -86,8 +87,8 @@ pub struct LatticeNode<'a> {
     pub pos_id: u16,
     /// Word cost from dictionary
     pub wcost: i16,
-    /// Feature string (lazily loaded)
-    pub feature: String,
+    /// Feature string (shared via Arc to avoid redundant allocations)
+    pub feature: Arc<str>,
     /// Whether this is an unknown word
     pub is_unknown: bool,
 }
@@ -98,7 +99,7 @@ impl<'a> LatticeNode<'a> {
         text: &'a str,
         start: usize,
         entry: &DictionaryEntry,
-        feature: String,
+        feature: Arc<str>,
     ) -> Self {
         Self {
             surface: &text[start..start + entry.length],
@@ -143,7 +144,7 @@ impl<'a> LatticeNode<'a> {
             right_id: 0,
             pos_id: 0,
             wcost: 0,
-            feature: "BOS/EOS".to_string(),
+            feature: Arc::from("BOS/EOS"),
             is_unknown: false,
         }
     }
@@ -159,7 +160,7 @@ impl<'a> LatticeNode<'a> {
             right_id: 0,
             pos_id: 0,
             wcost: 0,
-            feature: "BOS/EOS".to_string(),
+            feature: Arc::from("BOS/EOS"),
             is_unknown: false,
         }
     }
@@ -170,7 +171,7 @@ impl<'a> LatticeNode<'a> {
         start: usize,
         length: usize,
         entry: &DictionaryEntry,
-        feature: String,
+        feature: Arc<str>,
     ) -> Self {
         Self {
             surface: &text[start..start + length],
@@ -346,7 +347,7 @@ impl<'a> Lattice<'a> {
                     right_id: 0,
                     pos_id: 0,
                     wcost: 10000, // High cost for unknown
-                    feature: format!("未知語,{category:?}"),
+                    feature: Arc::from(format!("未知語,{category:?}").as_str()),
                     is_unknown: true,
                 });
             }
@@ -499,10 +500,10 @@ impl<'a> Lattice<'a> {
                 .find(|entry| entry.length == e - s);
 
             let node = if let Some(entry) = exact_entry {
-                let feature = span
-                    .feature
-                    .clone()
-                    .unwrap_or_else(|| entry.feature.clone());
+                let feature: Arc<str> = match &span.feature {
+                    Some(s) => Arc::from(s.as_str()),
+                    None => Arc::clone(&entry.feature),
+                };
                 LatticeNode {
                     surface: &text[s..e],
                     start: s,
@@ -517,10 +518,10 @@ impl<'a> Lattice<'a> {
                 }
             } else {
                 // Fall back to a high-cost synthetic unknown node.
-                let feature = span
-                    .feature
-                    .clone()
-                    .unwrap_or_else(|| "未知語,強制".to_string());
+                let feature: Arc<str> = match &span.feature {
+                    Some(s) => Arc::from(s.as_str()),
+                    None => Arc::from("未知語,強制"),
+                };
                 LatticeNode {
                     surface: &text[s..e],
                     start: s,

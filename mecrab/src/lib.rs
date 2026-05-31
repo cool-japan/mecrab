@@ -93,6 +93,7 @@ pub use rerank::{CostReranker, NullReranker, RerankCandidate, Reranker};
 pub use types::{AnalysisResult, Morpheme, OutputFormat};
 pub use viterbi::analysis::TextScore;
 pub use viterbi::train::{CrfGradient, GoldMorpheme, GoldSegmentation, TrainStepSummary};
+pub use viterbi::train_loop::{DictTrainConfig, DictTrainSummary, EpochStats, TrainingMatrix};
 
 #[cfg(feature = "neural")]
 pub use rerank::neural::NeuralReranker;
@@ -717,6 +718,26 @@ impl MeCrab {
     /// Runs Viterbi (for total cost and OOV count) and forward-backward (for
     /// segmentation perplexity and entropy) sharing one lattice build.
     ///
+    /// Train dictionary connection costs on a gold-annotated corpus.
+    ///
+    /// Returns a [`TrainingMatrix`] containing the updated costs (call
+    /// [`TrainingMatrix::write_binary`] to persist) and a [`DictTrainSummary`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the dictionary cannot be accessed.
+    pub fn train_dict(
+        &self,
+        corpus: &[viterbi::train::GoldSegmentation],
+        config: &viterbi::train_loop::DictTrainConfig,
+    ) -> Result<(TrainingMatrix, DictTrainSummary)> {
+        let dict_guard = self.dictionary.load();
+        let dict = &***dict_guard;
+        let mut matrix = TrainingMatrix::from_connection_matrix(&dict.matrix);
+        let summary = viterbi::train_loop::train_dict(&mut matrix, corpus, dict, config);
+        Ok((matrix, summary))
+    }
+
     /// # Errors
     ///
     /// Returns an error if lattice construction or Viterbi solving fails.

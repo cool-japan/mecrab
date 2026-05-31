@@ -428,8 +428,8 @@ pub struct DictionaryEntry {
     pub pos_id: u16,
     /// Word cost
     pub wcost: i16,
-    /// Feature string
-    pub feature: String,
+    /// Feature string (shared via Arc to avoid redundant allocations)
+    pub feature: Arc<str>,
 }
 
 #[cfg(test)]

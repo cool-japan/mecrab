@@ -20,7 +20,7 @@
 
 use crate::dict::DictionaryEntry;
 use std::collections::HashMap;
-use std::sync::RwLock;
+use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use yada::DoubleArray;
 use yada::builder::DoubleArrayBuilder;
@@ -270,7 +270,7 @@ impl OverlayDictionary {
                                 right_id: entry.right_id,
                                 pos_id: entry.left_id,
                                 wcost: entry.wcost,
-                                feature: entry.feature.clone(),
+                                feature: Arc::from(entry.feature.as_str()),
                             });
                         }
                     }
@@ -288,7 +288,7 @@ impl OverlayDictionary {
                             right_id: entry.right_id,
                             pos_id: entry.left_id,
                             wcost: entry.wcost,
-                            feature: entry.feature.clone(),
+                            feature: Arc::from(entry.feature.as_str()),
                         });
                     }
                 }

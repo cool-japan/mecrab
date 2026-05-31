@@ -18,6 +18,7 @@ pub mod analysis;
 mod fb;
 pub mod nbest;
 pub mod train;
+pub mod train_loop;
 /// SIMD-accelerated cost functions.
 ///
 /// Always compiled; individual functions dispatch to NEON, AVX2/SSE4.1, WASM
@@ -509,7 +510,7 @@ impl<'a> ViterbiSolver<'a> {
                     word_id: cold.node.word_id,
                     pos_id: cold.node.pos_id,
                     wcost: cold.node.wcost,
-                    feature: cold.node.feature.clone(),
+                    feature: cold.node.feature.to_string(),
                     start_byte: cold.node.start,
                     end_byte: cold.node.end,
                 });
@@ -630,7 +631,7 @@ impl<'a> ViterbiSolver<'a> {
                         word_id: node.word_id,
                         pos_id: node.pos_id,
                         wcost: node.wcost,
-                        feature: node.feature.clone(),
+                        feature: node.feature.to_string(),
                         start_byte: node.start,
                         end_byte: node.end,
                     })
@@ -813,7 +814,7 @@ impl<'a> ViterbiSolver<'a> {
                         word_id: node.word_id,
                         pos_id: node.pos_id,
                         wcost: node.wcost,
-                        feature: node.feature.clone(),
+                        feature: node.feature.to_string(),
                         start_byte: node.start,
                         end_byte: node.end,
                     })
@@ -853,6 +854,7 @@ impl<'a> ViterbiSolver<'a> {
 mod tests {
     use super::*;
     use crate::lattice::LatticeNode;
+    use std::sync::Arc;
 
     #[test]
     fn test_path_node_creation() {
@@ -1061,7 +1063,7 @@ mod tests {
             right_id: 10,
             pos_id: 5,
             wcost: -50,
-            feature: "助詞,副助詞".to_string(),
+            feature: Arc::from("助詞,副助詞"),
             is_unknown: false,
         };
 
@@ -1156,7 +1158,7 @@ mod tests {
             right_id: 1,
             pos_id: 1,
             wcost: 10,
-            feature: "名詞".to_string(),
+            feature: Arc::from("名詞"),
             is_unknown: false,
         };
         let word_b = LatticeNode {
@@ -1168,7 +1170,7 @@ mod tests {
             right_id: 2,
             pos_id: 2,
             wcost: 20,
-            feature: "動詞".to_string(),
+            feature: Arc::from("動詞"),
             is_unknown: false,
         };
 
@@ -1248,7 +1250,7 @@ mod tests {
             right_id: 10,
             pos_id: 5,
             wcost: -50,
-            feature: "助詞,副助詞".to_string(),
+            feature: Arc::from("助詞,副助詞"),
             is_unknown: false,
         };
 
@@ -1307,7 +1309,7 @@ mod tests {
             right_id: 20,
             pos_id: 3,
             wcost: -30,
-            feature: "助動詞".to_string(),
+            feature: Arc::from("助動詞"),
             is_unknown: false,
         };
 
@@ -1390,7 +1392,7 @@ mod tests {
                 right_id: 20,
                 pos_id: 3,
                 wcost: -80, // negative wcost gives it a lower accumulated cost
-                feature: "助動詞,*,*,*,不変化型,基本形".to_string(),
+                feature: Arc::from("助動詞,*,*,*,不変化型,基本形"),
                 is_unknown: false,
             };
             let eos_node = LatticeNode::eos(text_len);
@@ -1454,7 +1456,7 @@ mod tests {
                 right_id: 10,
                 pos_id: 5,
                 wcost: -50, // negative wcost → lower accumulated cost than EOS
-                feature: "助詞,副助詞".to_string(),
+                feature: Arc::from("助詞,副助詞"),
                 is_unknown: false,
             };
             let eos_node = LatticeNode::eos(text_len);

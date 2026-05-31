@@ -268,7 +268,7 @@ impl<'a> ViterbiSolver<'a> {
                     let prob = log_prob.exp().clamp(0.0_f64, 1.0_f64);
                     by_position[pos].push(NodeMarginal {
                         surface: node.surface.to_string(),
-                        feature: node.feature.clone(),
+                        feature: node.feature.to_string(),
                         start: node.start,
                         end: node.end,
                         log_prob,

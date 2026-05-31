@@ -363,6 +363,6 @@
 - [x] **CRF gradient infrastructure** (`viterbi/train.rs`): `GoldSegmentation` (with `from_mecab_tsv`), `CrfGradient`, `compute_sentence_gradient()`, `accumulate_batch_gradient()`, `apply_conn_gradient_update()`, `ViterbiSolver::compute_edge_expected_counts()`. Foundation for online dictionary cost training.
 
 #### Deferred (next round)
-- [ ] `feature: String → Cow<'dict, str>` borrow refactor (eliminate K feature allocations per parse)
-- [ ] Dictionary cost training loop with matrix update + binary write-back (using CRF gradient infrastructure now in place)
-- [ ] `kizame train` command consuming annotated TSV corpus
+- [x] `feature: String → Arc<str>` interning refactor (eliminates K feature allocations per parse; DictionaryEntry + LatticeNode; Morpheme.feature stays String)
+- [x] Dictionary cost training loop with matrix update + binary write-back (TrainingMatrix, DictTrainConfig, train_dict, MeCrab::train_dict())
+- [x] `kizame train` command consuming annotated TSV corpus

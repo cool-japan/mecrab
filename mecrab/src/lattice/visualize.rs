@@ -291,7 +291,7 @@ impl<'a> DotBuilder<'a> {
                 };
 
                 // Handle EOS specially
-                if node.feature == "BOS/EOS" && end_pos == self.lattice.nodes_at.len() - 1 {
+                if node.feature.as_ref() == "BOS/EOS" && end_pos == self.lattice.nodes_at.len() - 1 {
                     // EOS: find all nodes ending at text.len()
                     let text_len = self.lattice.text.len();
                     if text_len + 1 < self.lattice.nodes_at.len() {
@@ -352,7 +352,7 @@ impl<'a> DotBuilder<'a> {
 
         // Surface form (or BOS/EOS)
         if node.surface.is_empty() {
-            if node.feature == "BOS/EOS" {
+            if node.feature.as_ref() == "BOS/EOS" {
                 if node.start == 0 {
                     label.push_str("BOS");
                 } else {
@@ -409,7 +409,7 @@ impl<'a> DotBuilder<'a> {
         let mut styles = Vec::new();
 
         // BOS/EOS special style
-        if node.feature == "BOS/EOS" {
+        if node.feature.as_ref() == "BOS/EOS" {
             styles.push("shape=diamond".to_string());
             styles.push("style=filled".to_string());
             styles.push("fillcolor=lightgray".to_string());
@@ -643,7 +643,7 @@ mod tests {
             right_id: 1,
             pos_id: 1,
             wcost: 100,
-            feature: "名詞,一般".to_string(),
+            feature: std::sync::Arc::from("名詞,一般"),
             is_unknown: false,
         };
         let nodes_at = vec![
@@ -680,7 +680,7 @@ mod tests {
             right_id: 1,
             pos_id: 1,
             wcost: 100,
-            feature: "名詞,一般".to_string(),
+            feature: std::sync::Arc::from("名詞,一般"),
             is_unknown: false,
         };
         let nodes_at = vec![

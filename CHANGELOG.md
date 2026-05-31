@@ -2,7 +2,25 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased]
+## [Unreleased] — v0.3.5
+
+### Performance
+
+- **Feature string Arc interning** (`dict/sys_dic.rs`, `dict/mod.rs`, `lattice/mod.rs`): changed `DictionaryEntry.feature` and `LatticeNode.feature` from `String` to `Arc<str>`. `SysDic` now holds a `RwLock<HashMap<u32, Arc<str>>>` keyed by `feature_offset`; first lookup per unique feature allocates an `Arc<str>`, all subsequent calls do a lock-free read + `Arc::clone()`. Eliminates O(N×K) String allocations during lattice building (N positions × K avg DAT matches per position) — reduces to O(U) allocations where U = unique feature strings (~420k in IPADIC). `Morpheme.feature` is unchanged (still `String`; one allocation at result-time only).
+
+### Added
+
+- **Dictionary cost training loop** (`mecrab/src/viterbi/train_loop.rs`): `TrainingMatrix` (mutable i16 copy of connection matrix with `from_connection_matrix`, `cost`, `apply_gradient`, `write_binary`); `DictTrainConfig` (lr, batch_size, epochs, l2_strength, verbose with sensible defaults); `EpochStats`, `DictTrainSummary`; `train_dict()` mini-batch SGD loop with optional L2 regularization. All types re-exported from crate root. 5 unit tests covering cost formula, gradient application, binary I/O, and config defaults.
+- **`MeCrab::train_dict()`** (`lib.rs`): loads connection matrix from the live dictionary, runs the training loop, returns `(TrainingMatrix, DictTrainSummary)`. Callers call `matrix.write_binary(path)` to persist.
+- **`kizame train` command** (`kizame/src/commands/train.rs`): `--dicdir`, `--corpus`, `--epochs`, `--learning-rate`, `--batch-size`, `--l2`, `--output-matrix`, `--verbose` flags. Parses MeCab TSV corpus (blocks separated by `EOS`), reconstructs gold sentences, calls `train_dict`, writes updated `matrix.bin`.
+
+### Fixed
+
+- **Matrix index bug in `apply_conn_gradient_update`** (`viterbi/train.rs`): was using `right_id * lsize + left_id` (row-major by right_id) but `ConnectionMatrix::cost()` uses `right_id + lsize * left_id` (row-major by left_id). Fixed formula and updated the corresponding unit test.
+
+---
+
+## [Previous] — v0.3.4
 
 ### Added
 

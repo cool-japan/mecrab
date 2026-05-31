@@ -10,6 +10,7 @@ pub mod parse;
 pub mod score;
 #[cfg(feature = "server")]
 pub mod serve;
+pub mod train;
 pub mod vectors;
 
 use clap::ValueEnum;

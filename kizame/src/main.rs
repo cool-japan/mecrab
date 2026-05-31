@@ -26,7 +26,7 @@ use commands::lsp::LspArgs;
 use commands::serve::ServeArgs;
 use commands::{
     dict::DictCommands, explore::ExploreArgs, parse::ParseArgs, score::ScoreArgs,
-    vectors::VectorsCommands,
+    train::TrainArgs, vectors::VectorsCommands,
 };
 #[cfg(feature = "full")]
 use std::path::PathBuf;
@@ -83,6 +83,9 @@ enum Commands {
 
     /// Score text: Viterbi cost, segmentation perplexity, entropy
     Score(ScoreArgs),
+
+    /// Train dictionary costs on a MeCab TSV annotated corpus
+    Train(TrainArgs),
 }
 
 #[cfg(feature = "full")]
@@ -140,6 +143,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         Some(Commands::Dict { command }) => commands::dict::run_dict(command),
         Some(Commands::Vectors { command }) => commands::vectors::run_vectors(command),
         Some(Commands::Score(args)) => commands::score::run_score(args),
+        Some(Commands::Train(args)) => commands::train::run_train(args),
         None => {
             // Default: run parse with top-level args
             commands::parse::run_parse(cli.parse_args)

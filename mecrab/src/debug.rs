@@ -48,7 +48,7 @@ impl DebugNode {
             left_id: node.left_id,
             right_id: node.right_id,
             wcost: node.wcost,
-            feature: node.feature.clone(),
+            feature: node.feature.to_string(),
             is_unknown: node.is_unknown,
             lattice_pos,
             node_idx,
