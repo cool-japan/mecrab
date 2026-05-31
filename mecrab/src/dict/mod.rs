@@ -267,13 +267,23 @@ impl Dictionary {
     ///
     /// This checks the overlay dictionary first, then the system dictionary.
     /// Returns all matching entries from both layers.
+    ///
+    /// ## Fast path
+    ///
+    /// When no words have been added to the overlay (the common case in
+    /// production), this method bypasses all overlay RwLock operations and
+    /// returns the system-dictionary results directly.  The check uses a
+    /// single `AtomicUsize::load(Acquire)` — no mutex or fence beyond that.
     pub fn lookup(&self, key: &str) -> Vec<DictionaryEntry> {
-        // Check overlay first (hot path for new words)
+        // Fast path: skip overlay entirely when it is empty.
+        // `is_empty()` is a lock-free atomic load — negligible overhead.
+        if self.overlay.is_empty() {
+            return self.sys_dic.common_prefix_search(key);
+        }
+
+        // Slow path: merge overlay results with system-dictionary results.
         let mut results = self.overlay.lookup(key);
-
-        // Then check system dictionary
         results.extend(self.sys_dic.common_prefix_search(key));
-
         results
     }
 
@@ -439,6 +449,28 @@ mod tests {
         assert_eq!(MECAB_SYS_DIC, 0);
         assert_eq!(MECAB_USR_DIC, 1);
         assert_eq!(MECAB_UNK_DIC, 2);
+    }
+
+    /// Verify `OverlayDictionary::is_empty()` starts true, becomes false after
+    /// `add_word`, and returns true again after the word is removed.
+    /// This is the standalone unit test for the overlay fast-path flag.
+    #[test]
+    fn test_overlay_is_empty_lifecycle() {
+        let overlay = OverlayDictionary::new();
+        assert!(overlay.is_empty(), "fresh overlay must be empty");
+
+        overlay.add_word(
+            "ChatGPT",
+            OverlayEntry::new(
+                "名詞,固有名詞,一般,*,*,*,ChatGPT,チャットジーピーティー,チャットジーピーティー",
+                5000,
+            ),
+        );
+        assert!(!overlay.is_empty(), "overlay must not be empty after add");
+
+        let removed = overlay.remove_word("ChatGPT");
+        assert!(removed, "remove_word should return true");
+        assert!(overlay.is_empty(), "overlay must be empty after remove");
     }
 }
 

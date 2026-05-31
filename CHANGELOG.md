@@ -6,6 +6,23 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **Constrained / partial parsing** (`mecrab/src/lattice/mod.rs`, `mecrab/src/lib.rs`): `ParseConstraints` type with `add_span(start, end, feature)` builder. `Lattice::build_with_constraints()` filters nodes that partially overlap forced spans and injects synthetic nodes where no dictionary match exists. `MeCrab::parse_with_constraints()` public API mirrors `parse()` exactly. Empty constraints produce bit-identical output to unconstrained parse. 3 new E2E tests in `mecrab-builder/tests/end_to_end.rs`.
+- **Bunsetsu (文節) chunker** (`mecrab/src/chunk.rs`): `BunsetsuChunker::chunk(&[Morpheme]) -> Vec<Bunsetsu>` groups morphemes using the classical 自立語/付属語 rule (noun/verb/adj/adv = content head; particle/aux = attaches to preceding bunsetsu; 記号 = singleton). `AnalysisResult::bunsetsu()` convenience method. `Bunsetsu` carries surface, byte span, morpheme range, head index, and `BunsetsuType`. Re-exported from crate root. 8 unit tests including byte-span verification, leading functional-word graceful fallback, auxiliary-verb attachment, and morpheme-range indexing.
+- **MeCab `-F`/`--node-format` template engine** (`mecrab/src/api/format.rs`): `AnalysisResult::format_with_template(template)` parses MeCab-compatible `%m`, `%H`, `%f[n]`, `%ps`/`%pS`/`%pe`, `%phl`/`%phr`, `%c`, `\n`/`\t`/`%%` placeholders; unknown placeholders pass through literally (MeCab behavior). `kizame parse -F '<template>'` CLI flag wires this engine. 18 unit tests covering all placeholder types, edge cases, and empty-input safety.
+- **Structured `Morpheme` accessors** (`mecrab/src/types.rs`): `pos()`, `pos_detail()`, `conjugation_type()`, `conjugation_form()`, `base_form()`/`lemma()`, `reading()`, `pronunciation_feature()` — each lazily parses the IPADIC CSV `feature` field and returns `Option<&str>` (None for absent or `*` fields). Closes the ergonomic gap: Rust callers no longer need to hand-split the feature string. 11 unit tests.
+- **CBOW training objective** (`mecrab-word2vec/src/`): `TrainingObjective::{SkipGram, Cbow}` enum; `TrainingConfig::objective` field; `Word2VecBuilder::objective()` / `cbow()` builder methods; `Trainer::train_cbow_hogwild()` — mean-context-vector prediction with negative sampling, same Hogwild! safety model as skip-gram; `kizame vectors train --cbow` CLI flag. Re-exported as `mecrab_word2vec::TrainingObjective`.
+
+### Fixed
+
+- **word2vec negative-sampling loss NaN bug** (`mecrab-word2vec/src/trainer.rs:418-422,465-469`, `skipgram.rs:115-150`): loss used raw dot product `f` in `ln_1p()` — `-(1-f).ln_1p()` = NaN when `f > 2`. Fixed to correct binary cross-entropy: `-(sigmoid_f.max(1e-7)).ln()` / `-((1-sigmoid_f).max(1e-7)).ln()`. Regression-guarded with a new unit test.
+
+### Performance
+
+- **Empty-overlay fast path** (`mecrab/src/dict/mod.rs`, `overlay.rs`): when no words have been added at runtime, `Dictionary::lookup()` now skips the two `RwLock` read-guards and `Vec` reallocation via a lock-free `AtomicUsize` counter on `OverlayDictionary`. Zero cost on the typical no-overlay path.
+- **Unknown-word category template cache** (`mecrab/src/dict/unknown.rs`): all 11 `CharCategory` entry templates are precomputed once at dictionary load time; `generate_entries(category, length)` now does an `O(1)` clone + length overwrite instead of a trie search + triple-`Vec` allocation per call. Eliminates the dominant allocation source for OOV-heavy input.
+
+### Added (previous — v0.3.2)
+
 - **LSP module split** (`kizame/src/commands/lsp/`): the monolithic `lsp.rs` (968 lines) is now a three-file module — `mod.rs` (public `LspArgs` + `run_lsp()` entry point, ~45 lines), `server.rs` (`MeCrabLanguageServer` struct, helper methods, all utility free-fns and the full test suite, ~490 lines), `handlers.rs` (`impl LanguageServer for MeCrabLanguageServer` with initialize/shutdown/hover/completion/did_open/did_change, ~170 lines). The public API and all 45 tests are preserved unchanged.
 - **Parallel lattice building** (`mecrab/src/lattice/mod.rs`, `parallel` feature): when compiled with `--features parallel`, the `Lattice::build()` forward pass dispatches to `build_parallel()` which runs dictionary lookups via `rayon::par_iter()` and merges results sequentially; unknown-word handling stays sequential. The sequential path remains the default. Verified bit-identical to the sequential builder for `すもももももももものうち` via a new integration test in `mecrab-builder/tests/lattice_parallel.rs`.
 - **WASM module split** (`mecrab/src/wasm/`): large wasm module previously in a single file is now split across `wasm/core.rs`, `wasm/loader.rs`, and `wasm/parse_impl.rs` under a `wasm/mod.rs` coordinator.

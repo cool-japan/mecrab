@@ -111,11 +111,13 @@ impl SkipGram {
 
         if l2 + vector_size <= syn1neg.len() {
             let f = dot_product(&syn0[l1..l1 + vector_size], &syn1neg[l2..l2 + vector_size]);
-            let g = (label - sigmoid(f)) * alpha;
+            let sigmoid_f = sigmoid(f);
+            let g = (label - sigmoid_f) * alpha;
+            const LOSS_EPS: f32 = 1e-7;
             loss += if label > 0.5 {
-                -f.ln_1p()
+                -(sigmoid_f.max(LOSS_EPS)).ln()
             } else {
-                -(1.0 - f).ln_1p()
+                -((1.0 - sigmoid_f).max(LOSS_EPS)).ln()
             };
 
             // Update gradients
@@ -142,11 +144,13 @@ impl SkipGram {
             }
 
             let f = dot_product(&syn0[l1..l1 + vector_size], &syn1neg[l2..l2 + vector_size]);
-            let g = (label - sigmoid(f)) * alpha;
+            let sigmoid_f_neg = sigmoid(f);
+            let g = (label - sigmoid_f_neg) * alpha;
+            const LOSS_EPS_NEG: f32 = 1e-7;
             loss += if label > 0.5 {
-                -f.ln_1p()
+                -(sigmoid_f_neg.max(LOSS_EPS_NEG)).ln()
             } else {
-                -(1.0 - f).ln_1p()
+                -((1.0 - sigmoid_f_neg).max(LOSS_EPS_NEG)).ln()
             };
 
             // Update gradients

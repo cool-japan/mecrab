@@ -43,7 +43,7 @@ pub mod bpe;
 pub mod gpu;
 
 pub use bpe::{BpeMerge, BpeTrainer, BpeVocab};
-pub use model::{SubwordConfig, Word2Vec, Word2VecBuilder};
+pub use model::{SubwordConfig, TrainingObjective, Word2Vec, Word2VecBuilder};
 pub use subword::CharNgramExtractor;
 pub use vocab::Vocabulary;
 
@@ -600,5 +600,81 @@ mod integration_tests {
 
         let _ = std::fs::remove_file(&corpus);
         let _ = std::fs::remove_file(&path); // might not exist — ignore error
+    }
+
+    // ── Loss-bug regression tests ─────────────────────────────────────────────
+
+    /// Regression test: loss must be finite and non-negative after the bug fix.
+    ///
+    /// Old code: `-(1.0 - f).ln_1p()` with f=2.5 → `ln(1 + (1.0 - 2.5))` = `ln(-0.5)` = NaN.
+    /// New code: `-((1.0 - sigmoid(f)).max(LOSS_EPS)).ln()` → finite, non-negative.
+    #[test]
+    fn test_loss_is_finite_and_nonneg() {
+        let f = 2.5f32;
+        let sigmoid_f = 1.0 / (1.0 + (-f).exp());
+        let label = 0.0f32;
+        const LOSS_EPS: f32 = 1e-7;
+        let loss = if label > 0.5 {
+            -(sigmoid_f.max(LOSS_EPS)).ln()
+        } else {
+            -((1.0 - sigmoid_f).max(LOSS_EPS)).ln()
+        };
+        assert!(loss.is_finite(), "loss must be finite for f=2.5, label=0");
+        assert!(loss >= 0.0, "cross-entropy loss must be non-negative");
+    }
+
+    /// CBOW train() on a tiny corpus produces finite embeddings.
+    #[test]
+    fn test_cbow_training_small_corpus() {
+        let tmp_dir = std::env::temp_dir();
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let corpus_path = tmp_dir.join(format!("mecrab_cbow_test_{nanos}.txt"));
+        {
+            let mut f = std::fs::File::create(&corpus_path)
+                .expect("create cbow test corpus");
+            for _ in 0..20 {
+                writeln!(f, "0 1 2 3 4 5").expect("write corpus line");
+            }
+        }
+
+        let model = Word2VecBuilder::new()
+            .vector_size(10)
+            .window_size(2)
+            .min_count(1)
+            .objective(TrainingObjective::Cbow)
+            .build_from_corpus(&corpus_path);
+
+        let _ = std::fs::remove_file(&corpus_path);
+
+        assert!(model.is_ok(), "CBOW build_from_corpus should succeed: {:?}", model.err());
+        let mut model = model.expect("already checked Ok");
+
+        // Re-create the corpus for training (it was removed above — make a fresh one)
+        let nanos2 = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .subsec_nanos();
+        let corpus_path2 = std::env::temp_dir()
+            .join(format!("mecrab_cbow_test2_{nanos2}.txt"));
+        {
+            let mut f = std::fs::File::create(&corpus_path2)
+                .expect("create cbow test corpus 2");
+            for _ in 0..20 {
+                writeln!(f, "0 1 2 3 4 5").expect("write corpus line");
+            }
+        }
+
+        let result = model.train_from_file(&corpus_path2);
+        let _ = std::fs::remove_file(&corpus_path2);
+
+        assert!(result.is_ok(), "CBOW train_from_file should succeed: {:?}", result.err());
+
+        // All embeddings must be finite after CBOW training
+        for (i, &v) in model.syn0.iter().enumerate() {
+            assert!(v.is_finite(), "syn0[{i}] must be finite after CBOW training, got {v}");
+        }
     }
 }

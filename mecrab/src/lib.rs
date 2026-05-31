@@ -60,6 +60,7 @@
 
 pub mod bench;
 pub mod builder;
+pub mod chunk;
 pub mod corpus;
 pub mod debug;
 pub mod dict;
@@ -84,8 +85,10 @@ pub mod wasm;
 pub mod python;
 
 pub use builder::MeCrabBuilder;
+pub use chunk::{Bunsetsu, BunsetsuChunker, BunsetsuType};
 pub use corpus::{CorpusStats, SurfaceVocab};
 pub use error::{Error, Result};
+pub use lattice::ParseConstraints;
 pub use rerank::{CostReranker, NullReranker, RerankCandidate, Reranker};
 pub use types::{AnalysisResult, Morpheme, OutputFormat};
 
@@ -242,6 +245,68 @@ impl MeCrab {
         let path = solver.solve(&lattice)?;
 
         // Convert path to morphemes with optional semantic and IPA enrichment
+        let morphemes = path
+            .into_iter()
+            .map(|node| {
+                let entities = if self.semantic_enabled {
+                    self.get_entities_for_surface(&node.surface)
+                } else {
+                    Vec::new()
+                };
+
+                let pronunciation = if self.ipa_enabled {
+                    self.get_ipa_pronunciation(&node.feature)
+                } else {
+                    None
+                };
+
+                let embedding = if self.vector_enabled {
+                    self.get_embedding(node.word_id)
+                } else {
+                    None
+                };
+
+                Morpheme {
+                    surface: node.surface,
+                    word_id: node.word_id,
+                    pos_id: node.pos_id,
+                    wcost: node.wcost,
+                    feature: node.feature,
+                    entities,
+                    pronunciation,
+                    embedding,
+                    start_byte: node.start_byte,
+                    end_byte: node.end_byte,
+                }
+            })
+            .collect();
+
+        Ok(AnalysisResult {
+            morphemes,
+            format: self.output_format,
+        })
+    }
+
+    /// Parse text with forced span constraints.
+    ///
+    /// Each constraint forces `text[start..end]` to become exactly one token.
+    /// An empty [`ParseConstraints`] produces byte-identical output to [`parse`](Self::parse).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lattice construction or Viterbi solving fails.
+    pub fn parse_with_constraints(
+        &self,
+        text: &str,
+        constraints: &ParseConstraints,
+    ) -> Result<AnalysisResult> {
+        let dict_guard = self.dictionary.load();
+        let dict = &***dict_guard;
+
+        let lattice = Lattice::build_with_constraints(text, dict, constraints)?;
+        let solver = ViterbiSolver::new(dict);
+        let path = solver.solve(&lattice)?;
+
         let morphemes = path
             .into_iter()
             .map(|node| {

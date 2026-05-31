@@ -325,3 +325,29 @@
 - [x] Deleted `FeatureTable::from_bytes` (empty no-op stub — real path is `SysDic::get_feature`)
 - [x] Deleted `CachedMatrix` struct and `cached_matrix.rs` (zero constructors anywhere in production)
 - [x] Deleted `CharDefCached` struct and impl (zero constructors anywhere in production)
+
+## v0.3.3 Additions (2026-05-31)
+
+### Completed
+
+#### MeCab Parity Features
+- [x] **Constrained / partial parsing** (`parse_with_constraints`, `ParseConstraints`, `ForcedSpan`) — force specific byte spans to be single tokens; inject synthetic nodes with optional custom features; empty constraints are bit-identical to plain `parse()`.
+- [x] **Custom node-format templates** (`-F`/`--node-format`) — MeCab-compatible `%m`, `%H`, `%f[n]`, `%ps/%pe`, `%phl/%phr`, `%c`, `\n`, `\t`, `%%` placeholder engine on `AnalysisResult::format_with_template()`; wired into `kizame parse -F`.
+- [x] **Bunsetsu (文節) chunker** (`mecrab::chunk`) — `BunsetsuChunker::chunk(&[Morpheme]) -> Vec<Bunsetsu>`, classical 自立語/付属語 rule, `BunsetsuType` enum, `AnalysisResult::bunsetsu()` convenience method; re-exported from crate root.
+
+#### Ergonomics
+- [x] **Structured `Morpheme` accessors** — `pos()`, `pos_detail()`, `conjugation_type()`, `conjugation_form()`, `base_form()`/`lemma()`, `reading()`, `pronunciation_feature()` parsing IPADIC CSV field indices; returns `Option<&str>` with `*`→`None`.
+
+#### ML Correctness
+- [x] **word2vec loss NaN bug fixed** — `trainer.rs`/`skipgram.rs`: negative-sampling loss used raw dot product `f` in `ln_1p()` producing NaN for `f > 2`; fixed to correct binary cross-entropy `-(sigmoid_f.max(1e-7)).ln()`.
+- [x] **CBOW training objective** — `TrainingObjective::{SkipGram, Cbow}`, `TrainingConfig::objective`, `Trainer::train_cbow_hogwild()`, `kizame vectors train --cbow`.
+
+#### Performance
+- [x] Empty-overlay fast path: `Dictionary::lookup()` uses lock-free `AtomicUsize` counter; skips RwLock guards entirely when overlay is empty (common case).
+- [x] Unknown-word category template cache: all 11 `CharCategory` entry templates precomputed at dict load; `generate_entries()` is now O(1) clone + length write instead of per-call trie search.
+
+#### Deferred (next round)
+- [ ] CSR-flatten `nodes_at`/`ViterbiTable` (single contiguous allocation instead of Vec-of-Vecs)
+- [ ] `feature: String → Cow<'dict, str>` borrow refactor (eliminate K feature allocations per parse)
+- [ ] Exact lattice N-best via backward-A* (current N-best is approximate, single back-pointer per node)
+- [ ] Dictionary cost training (CRF/MaxEnt over `forward_backward` expectations + `matrix_writer`)

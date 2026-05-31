@@ -75,6 +75,14 @@ pub struct ParseArgs {
     #[arg(long)]
     pub wakati_word_id: bool,
 
+    /// MeCab-compatible node-format template (e.g. "%m,%f[0]\n").
+    ///
+    /// When set, this template is expanded for every content morpheme and the
+    /// result is written to the output, overriding the `-O` format flag.
+    /// Supports the same placeholders as MeCab's `--node-format` option.
+    #[arg(short = 'F', long = "node-format", value_name = "TEMPLATE")]
+    pub node_format: Option<String>,
+
     /// N-best output (number of alternative analyses to show)
     #[arg(short = 'n', long)]
     pub nbest: Option<usize>,
@@ -232,6 +240,12 @@ pub fn run_parse(args: ParseArgs) -> Result<(), Box<dyn std::error::Error>> {
                     .map(|m| m.word_id.to_string())
                     .collect();
                 writeln!(output, "{}", word_ids.join(" "))?;
+            } else if let Some(ref tmpl) = args.node_format {
+                // `-F` / `--node-format`: MeCab-compatible per-morpheme template.
+                // The template is applied to all content morphemes; the result is
+                // emitted directly without a trailing EOS line.
+                let rendered = result.format_with_template(tmpl);
+                write!(output, "{}", rendered)?;
             } else if use_color && matches!(format, OutputFormat::Default | OutputFormat::Dump) {
                 write_colored_result(&mut output, &result)?;
             } else {

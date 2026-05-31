@@ -1,7 +1,7 @@
 //! Multi-threaded word2vec trainer with Hogwild! algorithm
 
 use crate::Result;
-use crate::model::TrainingConfig;
+use crate::model::{TrainingConfig, TrainingObjective};
 use crate::skipgram::SkipGram;
 use crate::subword::CharNgramExtractor;
 use crate::vocab::Vocabulary;
@@ -275,36 +275,81 @@ impl Trainer {
                                 }
                             }
                         } else {
-                            // Standard (non-subword) training path
-                            for offset in 1..=window {
-                                // Left context
-                                if pos >= offset {
-                                    let context_id = sentence[pos - offset];
-                                    if self.vocab.contains(context_id) {
-                                        unsafe {
-                                            self.train_word_pair_hogwild(
-                                                center_id,
-                                                context_id,
-                                                current_alpha,
-                                                syn0_ptr,
-                                                syn1neg_ptr,
-                                                vector_size,
-                                                array_size,
-                                                &skipgram,
-                                                &mut rng,
-                                            );
+                            // Standard (non-subword) training path — dispatch on objective
+                            match self.config.objective {
+                                TrainingObjective::SkipGram => {
+                                    for offset in 1..=window {
+                                        // Left context
+                                        if pos >= offset {
+                                            let context_id = sentence[pos - offset];
+                                            if self.vocab.contains(context_id) {
+                                                // SAFETY: Hogwild! — multiple threads write to
+                                                // shared syn0/syn1neg without locks. Race
+                                                // conditions are acceptable (see Hogwild! paper).
+                                                unsafe {
+                                                    self.train_word_pair_hogwild(
+                                                        center_id,
+                                                        context_id,
+                                                        current_alpha,
+                                                        syn0_ptr,
+                                                        syn1neg_ptr,
+                                                        vector_size,
+                                                        array_size,
+                                                        &skipgram,
+                                                        &mut rng,
+                                                    );
+                                                }
+                                            }
+                                        }
+
+                                        // Right context
+                                        if pos + offset < sentence.len() {
+                                            let context_id = sentence[pos + offset];
+                                            if self.vocab.contains(context_id) {
+                                                // SAFETY: Hogwild!
+                                                unsafe {
+                                                    self.train_word_pair_hogwild(
+                                                        center_id,
+                                                        context_id,
+                                                        current_alpha,
+                                                        syn0_ptr,
+                                                        syn1neg_ptr,
+                                                        vector_size,
+                                                        array_size,
+                                                        &skipgram,
+                                                        &mut rng,
+                                                    );
+                                                }
+                                            }
                                         }
                                     }
                                 }
-
-                                // Right context
-                                if pos + offset < sentence.len() {
-                                    let context_id = sentence[pos + offset];
-                                    if self.vocab.contains(context_id) {
+                                TrainingObjective::Cbow => {
+                                    // Collect all valid context word IDs in the window
+                                    let mut context_ids: Vec<u32> =
+                                        Vec::with_capacity(2 * window);
+                                    for offset in 1..=window {
+                                        if pos >= offset {
+                                            let ctx = sentence[pos - offset];
+                                            if self.vocab.contains(ctx) {
+                                                context_ids.push(ctx);
+                                            }
+                                        }
+                                        if pos + offset < sentence.len() {
+                                            let ctx = sentence[pos + offset];
+                                            if self.vocab.contains(ctx) {
+                                                context_ids.push(ctx);
+                                            }
+                                        }
+                                    }
+                                    if !context_ids.is_empty() {
+                                        // SAFETY: Hogwild! — same safety model as skip-gram path.
+                                        // Pointers are valid for the entire training duration;
+                                        // concurrent unsynchronised writes are acceptable.
                                         unsafe {
-                                            self.train_word_pair_hogwild(
+                                            self.train_cbow_hogwild(
                                                 center_id,
-                                                context_id,
+                                                &context_ids,
                                                 current_alpha,
                                                 syn0_ptr,
                                                 syn1neg_ptr,
@@ -415,10 +460,11 @@ impl Trainer {
                 };
 
                 let g = (label - sigmoid_f) * alpha;
+                const LOSS_EPS: f32 = 1e-7;
                 loss += if label > 0.5 {
-                    -f.ln_1p()
+                    -(sigmoid_f.max(LOSS_EPS)).ln()
                 } else {
-                    -(1.0 - f).ln_1p()
+                    -((1.0 - sigmoid_f).max(LOSS_EPS)).ln()
                 };
 
                 // Update gradients (direct memory writes)
@@ -462,10 +508,11 @@ impl Trainer {
                 };
 
                 let g = (label - sigmoid_f) * alpha;
+                const LOSS_EPS_NEG: f32 = 1e-7;
                 loss += if label > 0.5 {
-                    -f.ln_1p()
+                    -(sigmoid_f.max(LOSS_EPS_NEG)).ln()
                 } else {
-                    -(1.0 - f).ln_1p()
+                    -((1.0 - sigmoid_f).max(LOSS_EPS_NEG)).ln()
                 };
 
                 // Update gradients
@@ -632,6 +679,165 @@ impl Trainer {
         }
     }
 
+    /// CBOW training step with Hogwild! (lock-free parallel).
+    ///
+    /// Given a center word `center_id` and a list of context word IDs, computes
+    /// the **mean** context vector `h`, then runs negative-sampling updates:
+    ///
+    /// - Positive sample (label=1): target = `center_id`
+    /// - Negative samples (label=0): sampled from the unigram noise distribution
+    ///
+    /// The accumulated gradient `neu1e` is then back-propagated to every context
+    /// word's `syn0` embedding.
+    ///
+    /// # Safety
+    ///
+    /// Caller must guarantee:
+    /// 1. `syn0_ptr` and `syn1neg_ptr` point to valid, sufficiently large allocations
+    ///    (at least `array_size` f32 elements each).
+    /// 2. Concurrent unsynchronised writes are acceptable — this is the Hogwild!
+    ///    assumption (see "Hogwild!: A Lock-Free Approach to Parallelizing SGD", NIPS 2011).
+    #[inline]
+    #[allow(clippy::too_many_arguments, clippy::needless_range_loop)]
+    unsafe fn train_cbow_hogwild(
+        &self,
+        center_id: u32,
+        context_ids: &[u32],
+        alpha: f32,
+        syn0_ptr: *mut f32,
+        syn1neg_ptr: *mut f32,
+        vector_size: usize,
+        array_size: usize,
+        skipgram: &Arc<SkipGram>,
+        rng: &mut impl Rng,
+    ) {
+        // SAFETY: All pointer operations are wrapped in unsafe blocks.
+        // The caller guarantees pointers are valid and the Hogwild! assumption holds.
+        unsafe {
+            let center_remapped = match self.vocab.get_remapped_id(center_id) {
+                Some(id) => id,
+                None => return,
+            };
+
+            let k = context_ids.len();
+            if k == 0 {
+                return;
+            }
+
+            // ── Step 1: Build mean context vector h ──────────────────────────
+            // h[i] = (1/k) * Σ_j syn0[context_j][i]
+            let mut h = vec![0.0f32; vector_size];
+            let inv_k = 1.0_f32 / k as f32;
+
+            for &ctx_id in context_ids {
+                let ctx_remapped = match self.vocab.get_remapped_id(ctx_id) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let l_ctx = ctx_remapped as usize * vector_size;
+                if l_ctx + vector_size > array_size {
+                    continue;
+                }
+                let ctx_vec = syn0_ptr.add(l_ctx);
+                for i in 0..vector_size {
+                    h[i] += *ctx_vec.add(i);
+                }
+            }
+            for i in 0..vector_size {
+                h[i] *= inv_k;
+            }
+
+            // ── Step 2: Gradient accumulator (shared across all context words) ─
+            let mut neu1e = vec![0.0f32; vector_size];
+            const LOSS_EPS: f32 = 1e-7;
+
+            // ── Step 3: Positive sample — predict center from context mean ────
+            {
+                let label = 1.0f32;
+                let l2 = center_remapped as usize * vector_size;
+                if l2 + vector_size <= array_size {
+                    let center_vec = syn1neg_ptr.add(l2);
+
+                    let mut f = 0.0f32;
+                    for i in 0..vector_size {
+                        f += h[i] * *center_vec.add(i);
+                    }
+
+                    let sigmoid_f = if f > 6.0 {
+                        1.0
+                    } else if f < -6.0 {
+                        0.0
+                    } else {
+                        1.0 / (1.0 + (-f).exp())
+                    };
+
+                    let _loss_pos = -(sigmoid_f.max(LOSS_EPS)).ln();
+                    let g = (label - sigmoid_f) * alpha;
+
+                    for i in 0..vector_size {
+                        neu1e[i] += g * *center_vec.add(i);
+                        *center_vec.add(i) += g * h[i];
+                    }
+                }
+            }
+
+            // ── Step 4: Negative samples ───────────────────────────────────────
+            for _ in 0..self.config.negative_samples {
+                let neg_remapped = skipgram.sample_negative(rng);
+
+                // Avoid using the true center word as a negative sample
+                if neg_remapped == center_remapped {
+                    continue;
+                }
+
+                let label = 0.0f32;
+                let l2 = neg_remapped as usize * vector_size;
+                if l2 + vector_size > array_size {
+                    continue;
+                }
+
+                let neg_vec = syn1neg_ptr.add(l2);
+
+                let mut f = 0.0f32;
+                for i in 0..vector_size {
+                    f += h[i] * *neg_vec.add(i);
+                }
+
+                let sigmoid_f = if f > 6.0 {
+                    1.0
+                } else if f < -6.0 {
+                    0.0
+                } else {
+                    1.0 / (1.0 + (-f).exp())
+                };
+
+                let _loss_neg = -((1.0 - sigmoid_f).max(LOSS_EPS)).ln();
+                let g = (label - sigmoid_f) * alpha;
+
+                for i in 0..vector_size {
+                    neu1e[i] += g * *neg_vec.add(i);
+                    *neg_vec.add(i) += g * h[i];
+                }
+            }
+
+            // ── Step 5: Back-propagate neu1e to every context word's syn0 ─────
+            for &ctx_id in context_ids {
+                let ctx_remapped = match self.vocab.get_remapped_id(ctx_id) {
+                    Some(id) => id,
+                    None => continue,
+                };
+                let l_ctx = ctx_remapped as usize * vector_size;
+                if l_ctx + vector_size > array_size {
+                    continue;
+                }
+                let ctx_vec = syn0_ptr.add(l_ctx);
+                for i in 0..vector_size {
+                    *ctx_vec.add(i) += neu1e[i];
+                }
+            }
+        }
+    }
+
     /// Load corpus into memory
     fn load_corpus(&self) -> Result<Vec<Vec<u32>>> {
         let file = File::open(&self.corpus_path)?;
@@ -754,7 +960,7 @@ impl Trainer {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::model::{TrainingConfig, Word2VecBuilder};
+    use crate::model::{TrainingConfig, TrainingObjective, Word2VecBuilder};
 
     /// Write a minimal corpus of whitespace-separated u32 token IDs to a temp
     /// file and return the path.  All IDs appear frequently enough to survive
@@ -791,6 +997,7 @@ mod tests {
             threads: 1,
             subword: None,
             use_gpu: false,
+            objective: TrainingObjective::SkipGram,
         };
 
         let mut vocab = Vocabulary::new(1, 0.0);

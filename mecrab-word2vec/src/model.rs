@@ -8,6 +8,16 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Training objective for word2vec.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum TrainingObjective {
+    /// Skip-gram: predict context from center word (default, better for rare words).
+    #[default]
+    SkipGram,
+    /// CBOW: predict center word from context (faster training, better for frequent words).
+    Cbow,
+}
+
 /// Configuration for FastText-style subword embeddings.
 #[derive(Debug, Clone)]
 pub struct SubwordConfig {
@@ -74,6 +84,8 @@ pub struct TrainingConfig {
     /// Attempt GPU-accelerated training when the `gpu` feature is enabled.
     /// Falls back silently to CPU Hogwild! when no wgpu adapter is available.
     pub use_gpu: bool,
+    /// Training objective: skip-gram (default) or CBOW.
+    pub objective: TrainingObjective,
 }
 
 impl Default for TrainingConfig {
@@ -90,6 +102,7 @@ impl Default for TrainingConfig {
             threads: 8,
             subword: None,
             use_gpu: false,
+            objective: TrainingObjective::SkipGram,
         }
     }
 }
@@ -426,6 +439,22 @@ impl Word2VecBuilder {
     pub fn use_gpu(mut self, flag: bool) -> Self {
         self.config.use_gpu = flag;
         self
+    }
+
+    /// Set the training objective (default: skip-gram).
+    ///
+    /// - [`TrainingObjective::SkipGram`]: predicts context words from a center word.
+    ///   Better for rare words, richer representations. Default.
+    /// - [`TrainingObjective::Cbow`]: predicts the center word from averaged context.
+    ///   Faster training, better for frequent words.
+    pub fn objective(mut self, obj: TrainingObjective) -> Self {
+        self.config.objective = obj;
+        self
+    }
+
+    /// Convenience wrapper: equivalent to `.objective(TrainingObjective::Cbow)`.
+    pub fn cbow(self) -> Self {
+        self.objective(TrainingObjective::Cbow)
     }
 
     /// Build vocabulary from corpus and create model

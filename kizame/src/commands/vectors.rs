@@ -83,6 +83,14 @@ pub enum VectorsCommands {
         /// Falls back silently to CPU Hogwild! when no GPU adapter is available.
         #[arg(long, default_value_t = false)]
         use_gpu: bool,
+
+        /// Use CBOW training objective instead of skip-gram.
+        ///
+        /// CBOW predicts the center word from averaged context embeddings.
+        /// Faster than skip-gram; better for frequent words in large corpora.
+        /// Default is skip-gram (better for rare words and richer representations).
+        #[arg(long, default_value_t = false)]
+        cbow: bool,
     },
     /// Convert word2vec/fastText format to MCV1 binary format
     Convert {
@@ -195,6 +203,7 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             bucket_count,
             surface_map,
             use_gpu,
+            cbow,
         } => run_vectors_train(
             &input,
             &output,
@@ -214,6 +223,7 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             bucket_count,
             surface_map.as_deref(),
             use_gpu,
+            cbow,
         ),
         VectorsCommands::Convert {
             input,
@@ -436,8 +446,9 @@ fn run_vectors_train(
     bucket_count: usize,
     surface_map_path: Option<&Path>,
     use_gpu: bool,
+    cbow: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
-    use mecrab_word2vec::Word2VecBuilder;
+    use mecrab_word2vec::{TrainingObjective, Word2VecBuilder};
 
     eprintln!("Training Word2Vec model...");
     eprintln!("  Input: {:?}", input);
@@ -493,6 +504,14 @@ fn run_vectors_train(
         );
     }
 
+    let objective = if cbow {
+        eprintln!("  Objective: CBOW");
+        TrainingObjective::Cbow
+    } else {
+        eprintln!("  Objective: skip-gram (default)");
+        TrainingObjective::SkipGram
+    };
+
     // Build model
     let builder = Word2VecBuilder::new()
         .vector_size(size)
@@ -504,7 +523,8 @@ fn run_vectors_train(
         .min_alpha(min_alpha)
         .epochs(epochs)
         .threads(threads)
-        .use_gpu(use_gpu);
+        .use_gpu(use_gpu)
+        .objective(objective);
 
     // Apply subword configuration if requested
     let builder = match (subword_min_n, subword_max_n) {

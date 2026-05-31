@@ -402,3 +402,94 @@ fn hot_swap_parse_continues() {
     let r2 = mecrab.parse("すもも").expect("parse after swap failed");
     assert!(!r2.morphemes.is_empty(), "must produce morphemes after swap");
 }
+
+// ── Constrained / partial parsing tests ──────────────────────────────────────
+
+/// Empty `ParseConstraints` must produce byte-identical segmentation to plain `parse`.
+#[test]
+fn test_constrained_empty_equals_plain() {
+    let mecrab = make_mecrab();
+    let text = "すもももももももものうち";
+    let plain = mecrab.parse(text).expect("plain parse failed");
+    let constrained = mecrab
+        .parse_with_constraints(text, &mecrab::ParseConstraints::new())
+        .expect("constrained parse failed");
+
+    let plain_surfaces: Vec<&str> = plain
+        .morphemes
+        .iter()
+        .map(|m| m.surface.as_str())
+        .collect();
+    let constrained_surfaces: Vec<&str> = constrained
+        .morphemes
+        .iter()
+        .map(|m| m.surface.as_str())
+        .collect();
+
+    assert_eq!(
+        plain_surfaces, constrained_surfaces,
+        "empty constraints must produce same segmentation as plain parse; \
+         plain={plain_surfaces:?} constrained={constrained_surfaces:?}"
+    );
+}
+
+/// A forced span `[0, 9)` must ensure "すもも" (3 × 3 UTF-8 bytes) appears as
+/// exactly one token starting at byte 0 and ending at byte 9.
+#[test]
+fn test_constrained_forced_span_boundary() {
+    let mecrab = make_mecrab();
+    // "すもも" = 3 chars × 3 bytes each = bytes 0..9
+    let text = "すもももももももものうち";
+    let mut constraints = mecrab::ParseConstraints::new();
+    constraints.add_span(0, 9, None);
+
+    let result = mecrab
+        .parse_with_constraints(text, &constraints)
+        .expect("constrained parse failed");
+
+    let sumomo = result
+        .morphemes
+        .iter()
+        .find(|m| m.surface == "すもも")
+        .expect("\"すもも\" must appear as a single morpheme");
+
+    assert_eq!(
+        sumomo.start_byte, 0,
+        "forced \"すもも\" must start at byte 0, got {}",
+        sumomo.start_byte
+    );
+    assert_eq!(
+        sumomo.end_byte, 9,
+        "forced \"すもも\" must end at byte 9, got {}",
+        sumomo.end_byte
+    );
+}
+
+/// A forced span with a custom feature string must propagate that feature to
+/// the resulting morpheme.  The feature must start with "名詞".
+#[test]
+fn test_constrained_forced_span_with_custom_feature() {
+    let mecrab = make_mecrab();
+    // Force bytes 0..9 ("すもも") to be a single token with a custom feature.
+    let text = "すもももももももものうち";
+    let custom_feature =
+        "名詞,固有名詞,*,*,*,*,テスト,テスト,テスト".to_string();
+    let mut constraints = mecrab::ParseConstraints::new();
+    constraints.add_span(0, 9, Some(custom_feature));
+
+    let result = mecrab
+        .parse_with_constraints(text, &constraints)
+        .expect("constrained parse with custom feature failed");
+
+    let sumomo = result
+        .morphemes
+        .iter()
+        .find(|m| m.surface == "すもも")
+        .expect("\"すもも\" must appear as a single morpheme even with a custom feature");
+
+    assert!(
+        sumomo.feature.starts_with("名詞"),
+        "forced span with custom feature must start with \"名詞\"; got: {}",
+        sumomo.feature
+    );
+}

@@ -251,6 +251,57 @@ impl AnalysisResult {
         Ok(())
     }
 
+    /// Format all non-empty morphemes using a MeCab-compatible node-format template.
+    ///
+    /// The template is applied once per morpheme (BOS/EOS morphemes with an empty
+    /// surface or the literal surface `"EOS"` are skipped for MeCab compatibility).
+    ///
+    /// # Supported placeholders
+    ///
+    /// | Placeholder | Meaning |
+    /// |-------------|---------|
+    /// | `%m`        | Surface form |
+    /// | `%H`        | Full IPADIC feature string |
+    /// | `%f[n]`     | n-th comma-separated feature field (0-based); `*` when absent |
+    /// | `%ps`       | Start byte position in the input text |
+    /// | `%pS`       | Same as `%ps` (MeCab ASCII-mode preceding-space alias) |
+    /// | `%pe`       | End byte position in the input text |
+    /// | `%phl`      | Left-context id (`pos_id` cast to u32, matching MeCab convention) |
+    /// | `%phr`      | Right-context id (same value as `%phl` for IPADIC) |
+    /// | `%c`        | Word cost (`wcost`) |
+    /// | `\n`        | Newline |
+    /// | `\t`        | Tab |
+    /// | `%%`        | Literal `%` |
+    ///
+    /// Unknown placeholders (e.g. `%z`) are passed through literally as MeCab does.
+    ///
+    /// # Example
+    ///
+    /// ```text
+    /// result.format_with_template("%m,%f[0]\n")
+    /// // → "東京,名詞\nは,助詞\n"
+    /// ```
+    pub fn format_with_template(&self, template: &str) -> String {
+        // Skip BOS/EOS entries: empty surface or the literal string "EOS".
+        let content_morphemes: Vec<&crate::Morpheme> = self
+            .morphemes
+            .iter()
+            .filter(|m| !m.surface.is_empty() && m.surface != "EOS")
+            .collect();
+
+        if content_morphemes.is_empty() {
+            return String::new();
+        }
+
+        let mut output = String::with_capacity(template.len() * content_morphemes.len());
+
+        for morpheme in content_morphemes {
+            expand_template(template, morpheme, &mut output);
+        }
+
+        output
+    }
+
     /// Format as N-Quads RDF.
     pub(crate) fn format_nquads(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         // Prepare token data for export
@@ -292,6 +343,215 @@ impl AnalysisResult {
             "http://example.org/graph",
         );
         write!(f, "{}", nquads)
+    }
+}
+
+// ── Node-format template engine ───────────────────────────────────────────────
+
+/// Expand `template` for one `morpheme`, appending the result to `out`.
+///
+/// This is the core state machine used by [`AnalysisResult::format_with_template`].
+/// It processes the template string character by character and handles all
+/// recognised `%`- and `\`-escape sequences.
+#[allow(clippy::too_many_lines, clippy::single_match_else)]
+fn expand_template(template: &str, morpheme: &crate::Morpheme, out: &mut String) {
+    let bytes = template.as_bytes();
+    let len = bytes.len();
+    let mut i = 0usize;
+
+    while i < len {
+        match bytes[i] {
+            // ── `\`-escape sequences ─────────────────────────────────────
+            b'\\' => {
+                if i + 1 < len {
+                    match bytes[i + 1] {
+                        b'n' => {
+                            out.push('\n');
+                            i += 2;
+                        }
+                        b't' => {
+                            out.push('\t');
+                            i += 2;
+                        }
+                        other => {
+                            // Unknown escape: pass through literally.
+                            out.push('\\');
+                            out.push(other as char);
+                            i += 2;
+                        }
+                    }
+                } else {
+                    // Trailing backslash at end of template.
+                    out.push('\\');
+                    i += 1;
+                }
+            }
+
+            // ── `%`-format placeholders ──────────────────────────────────
+            b'%' => {
+                if i + 1 >= len {
+                    // Trailing `%` at end of template.
+                    out.push('%');
+                    i += 1;
+                    continue;
+                }
+
+                match bytes[i + 1] {
+                    // `%%` → literal `%`
+                    b'%' => {
+                        out.push('%');
+                        i += 2;
+                    }
+
+                    // `%m` → surface form
+                    b'm' => {
+                        out.push_str(&morpheme.surface);
+                        i += 2;
+                    }
+
+                    // `%H` → full feature string
+                    b'H' => {
+                        out.push_str(&morpheme.feature);
+                        i += 2;
+                    }
+
+                    // `%f[n]` → n-th feature field
+                    b'f' => {
+                        // Expect `[`, then digits, then `]`.
+                        if i + 2 < len && bytes[i + 2] == b'[' {
+                            // Find the closing `]`.
+                            let bracket_start = i + 3;
+                            match bytes[bracket_start..]
+                                .iter()
+                                .position(|&b| b == b']')
+                            {
+                                Some(bracket_len) => {
+                                    let digit_bytes = &bytes[bracket_start
+                                        ..bracket_start + bracket_len];
+                                    // Parse the field index (ASCII digits only).
+                                    let n_opt = std::str::from_utf8(digit_bytes)
+                                        .ok()
+                                        .and_then(|s| s.parse::<usize>().ok());
+                                    let field_val = n_opt.and_then(|n| {
+                                        let v = morpheme.feature.split(',').nth(n)?;
+                                        if v == "*" {
+                                            None
+                                        } else {
+                                            Some(v.to_owned())
+                                        }
+                                    });
+                                    out.push_str(
+                                        field_val.as_deref().unwrap_or("*"),
+                                    );
+                                    // Advance past `%f[n]`
+                                    i = bracket_start + bracket_len + 1;
+                                }
+                                None => {
+                                    // No closing `]` — pass through literally.
+                                    out.push('%');
+                                    out.push('f');
+                                    i += 2;
+                                }
+                            }
+                        } else {
+                            // `%f` not followed by `[` — pass through literally.
+                            out.push('%');
+                            out.push('f');
+                            i += 2;
+                        }
+                    }
+
+                    // `%p…` — positional / lattice attributes
+                    b'p' => {
+                        if i + 2 >= len {
+                            out.push('%');
+                            out.push('p');
+                            i += 2;
+                            continue;
+                        }
+                        match bytes[i + 2] {
+                            // `%ps` or `%pS` — start byte position
+                            b's' | b'S' => {
+                                out.push_str(&morpheme.start_byte.to_string());
+                                i += 3;
+                            }
+                            // `%pe` — end byte position
+                            b'e' => {
+                                out.push_str(&morpheme.end_byte.to_string());
+                                i += 3;
+                            }
+                            // `%ph…` — left/right context ids
+                            b'h' => {
+                                if i + 3 < len {
+                                    match bytes[i + 3] {
+                                        b'l' => {
+                                            out.push_str(
+                                                &(morpheme.pos_id as u32).to_string(),
+                                            );
+                                            i += 4;
+                                        }
+                                        b'r' => {
+                                            // Right-context id: same value for IPADIC.
+                                            out.push_str(
+                                                &(morpheme.pos_id as u32).to_string(),
+                                            );
+                                            i += 4;
+                                        }
+                                        _ => {
+                                            out.push('%');
+                                            out.push('p');
+                                            out.push('h');
+                                            i += 3;
+                                        }
+                                    }
+                                } else {
+                                    out.push('%');
+                                    out.push('p');
+                                    out.push('h');
+                                    i += 3;
+                                }
+                            }
+                            _ => {
+                                // Unknown `%p?` — pass through.
+                                out.push('%');
+                                out.push('p');
+                                i += 2;
+                            }
+                        }
+                    }
+
+                    // `%c` — word cost
+                    b'c' => {
+                        out.push_str(&morpheme.wcost.to_string());
+                        i += 2;
+                    }
+
+                    // Unknown placeholder — pass through literally (MeCab behaviour).
+                    other => {
+                        out.push('%');
+                        out.push(other as char);
+                        i += 2;
+                    }
+                }
+            }
+
+            // ── Ordinary byte ────────────────────────────────────────────
+            b => {
+                // Safety: we have verified `b` is a valid ASCII byte or the start
+                // of a multi-byte UTF-8 sequence.  Since we only match on single-byte
+                // patterns above, any non-ASCII leading byte falls here.  We push it
+                // back as a char obtained from the original `&str` slice.
+                //
+                // To avoid breaking multi-byte sequences we consume the full UTF-8
+                // character at position `i`.
+                //
+                // `template` is a valid `&str`; unwrap is safe here.
+                let ch = template[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+                let _ = b; // suppress unused-variable lint
+            }
+        }
     }
 }
 
@@ -754,7 +1014,7 @@ pub fn format_lattice_prob_with_positions(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_heuristic_deps, ipadic_to_feats, ipadic_to_upos, ipadic_xpos};
+    use super::{compute_heuristic_deps, expand_template, ipadic_to_feats, ipadic_to_upos, ipadic_xpos};
     use crate::{AnalysisResult, Morpheme, OutputFormat};
 
     fn make_morpheme(surface: &str, feature: &str) -> Morpheme {
@@ -1020,5 +1280,203 @@ mod tests {
             "expected 8 token lines, got {}",
             token_line_count
         );
+    }
+
+    // ── format_with_template tests ────────────────────────────────────────────
+
+    /// Build an `AnalysisResult` with custom morphemes for template tests.
+    fn make_result(morphemes: Vec<Morpheme>) -> AnalysisResult {
+        AnalysisResult {
+            morphemes,
+            format: OutputFormat::Default,
+        }
+    }
+
+    /// Make a morpheme with explicit byte positions and cost.
+    fn make_morpheme_at(
+        surface: &str,
+        feature: &str,
+        start: usize,
+        pos_id: u16,
+        wcost: i16,
+    ) -> Morpheme {
+        Morpheme {
+            surface: surface.to_owned(),
+            word_id: 0,
+            pos_id,
+            wcost,
+            feature: feature.to_owned(),
+            entities: vec![],
+            pronunciation: None,
+            embedding: None,
+            start_byte: start,
+            end_byte: start + surface.len(),
+        }
+    }
+
+    #[test]
+    fn test_template_surface_and_feature_field() {
+        // `%m,%f[0]\n` must produce one "surface,pos\n" line per morpheme.
+        let morphemes = vec![
+            make_morpheme("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ"),
+            make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ"),
+        ];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%m,%f[0]\n");
+        assert_eq!(out, "東京,名詞\nは,助詞\n");
+    }
+
+    #[test]
+    fn test_template_full_feature_string() {
+        // `%H` must emit the raw feature string unchanged.
+        let feature = "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ";
+        let morphemes = vec![make_morpheme("東京", feature)];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%H");
+        assert_eq!(out, feature);
+    }
+
+    #[test]
+    fn test_template_escaped_percent() {
+        // `%%` must produce a single literal `%`.
+        let morphemes = vec![make_morpheme("X", "名詞,*,*,*,*,*,*,*,*")];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%%");
+        assert_eq!(out, "%");
+    }
+
+    #[test]
+    fn test_template_tab_escape() {
+        // `\t` must produce a tab character.
+        let morphemes = vec![make_morpheme("X", "名詞,*,*,*,*,*,*,*,*")];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%m\t%f[0]");
+        assert_eq!(out, "X\t名詞");
+    }
+
+    #[test]
+    fn test_template_newline_escape() {
+        // `\n` must produce a newline character.
+        let morphemes = vec![make_morpheme("X", "名詞,*,*,*,*,*,*,*,*")];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%m\n");
+        assert_eq!(out, "X\n");
+    }
+
+    #[test]
+    fn test_template_unknown_placeholder_passthrough() {
+        // Unknown `%z` must be emitted literally (MeCab behavior).
+        let morphemes = vec![make_morpheme("X", "名詞,*,*,*,*,*,*,*,*")];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%z");
+        assert_eq!(out, "%z");
+    }
+
+    #[test]
+    fn test_template_feature_field_out_of_range_produces_star() {
+        // `%f[99]` on a 9-field feature string must produce `*`.
+        let morphemes = vec![make_morpheme(
+            "東京",
+            "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+        )];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%f[99]");
+        assert_eq!(out, "*");
+    }
+
+    #[test]
+    fn test_template_feature_field_star_value_produces_star() {
+        // A field equal to `*` in the feature string must render as `*`.
+        // Field 4 (活用型) is `*` for a proper noun.
+        let morphemes = vec![make_morpheme(
+            "東京",
+            "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+        )];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%f[4]");
+        assert_eq!(out, "*");
+    }
+
+    #[test]
+    fn test_template_empty_morpheme_list_returns_empty_string() {
+        // An `AnalysisResult` with no content morphemes must return `""`.
+        let result = make_result(vec![]);
+        let out = result.format_with_template("%m\n");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_template_eos_only_result_returns_empty_string() {
+        // A result containing only the EOS sentinel must return `""`.
+        let result = make_result(vec![make_morpheme("EOS", "")]);
+        let out = result.format_with_template("%m\n");
+        assert_eq!(out, "");
+    }
+
+    #[test]
+    fn test_template_byte_positions() {
+        // `%ps` / `%pe` must emit the start/end byte offsets.
+        // "東京" is 6 bytes in UTF-8, start=3 → end=9.
+        let morphemes = vec![make_morpheme_at("東京", "名詞,*,*,*,*,*,*,*,*", 3, 0, 0)];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%ps-%pe");
+        assert_eq!(out, "3-9");
+    }
+
+    #[test]
+    fn test_template_ps_alias_equals_ps() {
+        // `%pS` (uppercase S) must produce the same output as `%ps`.
+        let morphemes = vec![make_morpheme_at("A", "名詞,*,*,*,*,*,*,*,*", 10, 0, 0)];
+        let result = make_result(morphemes);
+        let with_lower = result.format_with_template("%ps");
+        let with_upper = result.format_with_template("%pS");
+        assert_eq!(with_lower, with_upper);
+    }
+
+    #[test]
+    fn test_template_word_cost() {
+        // `%c` must emit the wcost field.
+        let morphemes = vec![make_morpheme_at("X", "名詞,*,*,*,*,*,*,*,*", 0, 0, -42)];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%c");
+        assert_eq!(out, "-42");
+    }
+
+    #[test]
+    fn test_template_phl_and_phr() {
+        // `%phl` / `%phr` must emit the pos_id as u32.
+        let morphemes = vec![make_morpheme_at("X", "名詞,*,*,*,*,*,*,*,*", 0, 7, 0)];
+        let result = make_result(morphemes);
+        let out_l = result.format_with_template("%phl");
+        let out_r = result.format_with_template("%phr");
+        assert_eq!(out_l, "7");
+        assert_eq!(out_r, "7");
+    }
+
+    #[test]
+    fn test_template_two_morphemes_produces_two_lines() {
+        // A two-morpheme result with `%m\n` must yield two newline-terminated lines.
+        let morphemes = vec![
+            make_morpheme("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ"),
+            make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ"),
+        ];
+        let result = make_result(morphemes);
+        let out = result.format_with_template("%m\n");
+        assert_eq!(out, "東京\nは\n");
+    }
+
+    #[test]
+    fn test_template_expand_template_directly() {
+        // Test the internal `expand_template` function with a rich combined template.
+        let morpheme = make_morpheme_at(
+            "走る",
+            "動詞,自立,*,*,五段・ラ行,基本形,走る,ハシル,ハシル",
+            0,
+            5,
+            100,
+        );
+        let mut out = String::new();
+        expand_template("%m\t%f[0]\t%f[6]\t%c\n", &morpheme, &mut out);
+        assert_eq!(out, "走る\t動詞\t走る\t100\n");
     }
 }

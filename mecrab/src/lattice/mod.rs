@@ -13,6 +13,60 @@ pub use visualize::{DotBuilder, DotConfig, NodeShape, RankDir};
 use crate::Result;
 use crate::dict::{CharCategory, Dictionary, DictionaryEntry};
 
+// ── Constraint types ─────────────────────────────────────────────────────────
+
+/// Describes a byte span `[start, end)` that must form exactly one token.
+#[derive(Debug, Clone)]
+pub struct ForcedSpan {
+    /// Inclusive start byte offset in the input text.
+    pub start: usize,
+    /// Exclusive end byte offset in the input text.
+    pub end: usize,
+    /// Optional IPADIC feature string to assign to the synthetic node.
+    ///
+    /// When `None`, an unknown-word feature (`"未知語,強制"`) is used unless
+    /// a dictionary match is found (in which case the dictionary feature is used).
+    pub feature: Option<String>,
+}
+
+/// A set of constraints that force specific byte spans to be treated as single tokens.
+///
+/// Construct with [`ParseConstraints::new`] and populate via [`add_span`](ParseConstraints::add_span).
+#[derive(Debug, Clone, Default)]
+pub struct ParseConstraints {
+    spans: Vec<ForcedSpan>,
+}
+
+impl ParseConstraints {
+    /// Create an empty constraint set.
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a forced span: `text[start..end]` must be exactly one token.
+    ///
+    /// `feature` is an optional IPADIC feature string; `None` means auto-detect.
+    pub fn add_span(
+        &mut self,
+        start: usize,
+        end: usize,
+        feature: Option<String>,
+    ) -> &mut Self {
+        self.spans.push(ForcedSpan { start, end, feature });
+        self
+    }
+
+    /// Returns `true` when no constraints have been added.
+    pub fn is_empty(&self) -> bool {
+        self.spans.is_empty()
+    }
+
+    /// Returns a slice of all registered forced spans.
+    pub fn spans(&self) -> &[ForcedSpan] {
+        &self.spans
+    }
+}
+
 /// A node in the lattice representing a potential word/token
 #[derive(Debug, Clone)]
 pub struct LatticeNode<'a> {
@@ -373,6 +427,118 @@ impl<'a> Lattice<'a> {
         } else {
             &[]
         }
+    }
+
+    /// Build a constrained lattice: `text[span.start..span.end]` becomes exactly one token
+    /// for every `ForcedSpan` in `constraints`.
+    ///
+    /// When `constraints.is_empty()` this is byte-identical to `build(text, dict)`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the underlying `build` call fails.
+    pub fn build_with_constraints(
+        text: &'a str,
+        dict: &Dictionary,
+        constraints: &ParseConstraints,
+    ) -> Result<Self> {
+        let mut lattice = Self::build(text, dict)?;
+
+        if constraints.is_empty() {
+            return Ok(lattice);
+        }
+
+        let text_len = text.len();
+
+        // Step 1: remove nodes that partially overlap any forced span.
+        for pos in 1..=text_len {
+            lattice.nodes_at[pos].retain(|node| {
+                // Keep BOS/EOS sentinels (they have equal start and end).
+                if node.start == node.end {
+                    return true;
+                }
+                // Keep if the node does NOT partially overlap any forced span.
+                !constraints.spans().iter().any(|span| {
+                    let overlaps = node.start < span.end && node.end > span.start;
+                    let exact = node.start == span.start && node.end == span.end;
+                    overlaps && !exact
+                })
+            });
+        }
+
+        // Step 2: inject synthetic nodes for forced spans that have no exact match.
+        for span in constraints.spans() {
+            let s = span.start;
+            let e = span.end;
+
+            // Validate byte offsets.
+            if e > text_len || s >= e || !text.is_char_boundary(s) || !text.is_char_boundary(e) {
+                continue;
+            }
+
+            let slot = e + 1; // nodes_at index for nodes ending at byte `e`
+            if slot >= lattice.nodes_at.len() {
+                continue;
+            }
+
+            // Check if an exact node already exists.
+            let already_present = lattice.nodes_at[slot]
+                .iter()
+                .any(|n| n.start == s && n.end == e);
+
+            if already_present {
+                // Nothing to inject; constraint is already satisfied.
+                continue;
+            }
+
+            // Try a dictionary lookup for the exact span surface.
+            let surface_slice = &text[s..e];
+            let entries = dict.lookup(surface_slice);
+            let exact_entry = entries
+                .into_iter()
+                .find(|entry| entry.length == e - s);
+
+            let node = if let Some(entry) = exact_entry {
+                let feature = span
+                    .feature
+                    .clone()
+                    .unwrap_or_else(|| entry.feature.clone());
+                LatticeNode {
+                    surface: &text[s..e],
+                    start: s,
+                    end: e,
+                    word_id: entry.word_id,
+                    left_id: entry.left_id,
+                    right_id: entry.right_id,
+                    pos_id: entry.pos_id,
+                    wcost: entry.wcost,
+                    feature,
+                    is_unknown: false,
+                }
+            } else {
+                // Fall back to a high-cost synthetic unknown node.
+                let feature = span
+                    .feature
+                    .clone()
+                    .unwrap_or_else(|| "未知語,強制".to_string());
+                LatticeNode {
+                    surface: &text[s..e],
+                    start: s,
+                    end: e,
+                    word_id: u32::MAX,
+                    left_id: 0,
+                    right_id: 0,
+                    pos_id: 0,
+                    wcost: 5000,
+                    feature,
+                    is_unknown: true,
+                }
+            };
+
+            lattice.nodes_at[slot].push(node);
+        }
+
+        Ok(lattice)
     }
 }
 

@@ -21,6 +21,7 @@
 use crate::dict::DictionaryEntry;
 use std::collections::HashMap;
 use std::sync::RwLock;
+use std::sync::atomic::{AtomicUsize, Ordering};
 use yada::DoubleArray;
 use yada::builder::DoubleArrayBuilder;
 
@@ -48,6 +49,12 @@ pub struct OverlayDictionary {
     sorted_surfaces: RwLock<Vec<String>>,
     /// Flag indicating trie needs rebuild
     trie_dirty: RwLock<bool>,
+    /// Total number of individual `OverlayEntry` records stored.
+    ///
+    /// Maintained atomically so that `is_empty()` can perform a lock-free
+    /// check with a single `load(Relaxed)` — no RwLock acquisition required
+    /// in the common (empty-overlay) fast path.
+    entry_count: AtomicUsize,
 }
 
 /// A single entry in the overlay dictionary
@@ -102,6 +109,7 @@ impl OverlayDictionary {
             surface_index: RwLock::new(HashMap::new()),
             sorted_surfaces: RwLock::new(Vec::new()),
             trie_dirty: RwLock::new(false),
+            entry_count: AtomicUsize::new(0),
         }
     }
 
@@ -126,6 +134,8 @@ impl OverlayDictionary {
             let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
             entries.entry(surface.to_string()).or_default().push(entry);
         }
+        // Increment the lock-free counter used by `is_empty()` / `len()`.
+        self.entry_count.fetch_add(1, Ordering::Release);
         // Mark trie as dirty
         *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = true;
     }
@@ -152,14 +162,18 @@ impl OverlayDictionary {
     ///
     /// Returns true if the word was found and removed.
     pub fn remove_word(&self, surface: &str) -> bool {
-        let removed = {
+        let removed_count = {
             let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
-            entries.remove(surface).is_some()
+            entries.remove(surface).map(|v| v.len()).unwrap_or(0)
         };
-        if removed {
+        if removed_count > 0 {
+            // Keep the atomic counter consistent with the actual entry set.
+            self.entry_count.fetch_sub(removed_count, Ordering::Release);
             *self.trie_dirty.write().unwrap_or_else(|e| e.into_inner()) = true;
+            true
+        } else {
+            false
         }
-        removed
     }
 
     /// Rebuild the trie from current entries
@@ -285,20 +299,28 @@ impl OverlayDictionary {
     }
 
     /// Get the number of entries in the overlay
+    ///
+    /// Uses the `AtomicUsize` counter for O(1) performance — no RwLock acquired.
     pub fn len(&self) -> usize {
-        let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
-        entries.values().map(Vec::len).sum()
+        self.entry_count.load(Ordering::Acquire)
     }
 
-    /// Check if the overlay is empty
+    /// Returns `true` when no words have been added to the overlay.
+    ///
+    /// This is a lock-free O(1) check using an `AtomicUsize` counter —
+    /// no `RwLock` is acquired.  It is safe to call from the hot `lookup`
+    /// fast-path with negligible overhead.
+    #[inline]
     pub fn is_empty(&self) -> bool {
-        self.len() == 0
+        self.entry_count.load(Ordering::Acquire) == 0
     }
 
     /// Clear all entries from the overlay
     pub fn clear(&self) {
         let mut entries = self.entries.write().unwrap_or_else(|e| e.into_inner());
         entries.clear();
+        // Reset the lock-free counter together with the entries map.
+        self.entry_count.store(0, Ordering::Release);
         *self.trie.write().unwrap_or_else(|e| e.into_inner()) = None;
         *self
             .surface_index
@@ -332,11 +354,16 @@ impl OverlayDictionary {
         if snapshot.is_empty() {
             return;
         }
+        let mut added: usize = 0;
         {
             let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
             for (surface, entries) in snapshot {
+                added += entries.len();
                 guard.entry(surface).or_default().extend(entries);
             }
+        }
+        if added > 0 {
+            self.entry_count.fetch_add(added, Ordering::Release);
         }
         // Mark trie as dirty so it is rebuilt on next lookup.
         if let Ok(mut dirty) = self.trie_dirty.write() {
@@ -452,5 +479,64 @@ mod tests {
         // Subsequent lookups use the trie
         let results = overlay.lookup("Banana");
         assert_eq!(results.len(), 1);
+    }
+
+    /// Verify that `is_empty()` tracks the full lifecycle using the atomic counter:
+    /// starts true, becomes false after `add_word`, returns true after removing all words.
+    #[test]
+    fn test_is_empty_lifecycle() {
+        let overlay = OverlayDictionary::new();
+
+        // Fresh overlay must be empty
+        assert!(overlay.is_empty(), "new overlay should be empty");
+        assert_eq!(overlay.len(), 0);
+
+        overlay.add_simple("テスト", "テスト", "テスト", 5000);
+        assert!(!overlay.is_empty(), "overlay should not be empty after add");
+        assert_eq!(overlay.len(), 1);
+
+        // Add a second entry under the same surface key
+        overlay.add_word(
+            "テスト",
+            OverlayEntry::with_context(100, 100, 6000, "名詞,サ変接続,*,*,*,*,テスト,テスト,テスト"),
+        );
+        assert_eq!(overlay.len(), 2, "two entries for same surface");
+
+        // Remove the surface — both entries should disappear atomically
+        assert!(overlay.remove_word("テスト"));
+        assert!(overlay.is_empty(), "overlay should be empty after remove");
+        assert_eq!(overlay.len(), 0);
+    }
+
+    /// Verify that `clear()` resets the atomic counter.
+    #[test]
+    fn test_clear_resets_counter() {
+        let overlay = OverlayDictionary::new();
+
+        overlay.add_simple("Apple", "アップル", "アップル", 5000);
+        overlay.add_simple("Banana", "バナナ", "バナナ", 5000);
+        assert_eq!(overlay.len(), 2);
+        assert!(!overlay.is_empty());
+
+        overlay.clear();
+        assert_eq!(overlay.len(), 0);
+        assert!(overlay.is_empty());
+    }
+
+    /// Verify that `restore_from` keeps the atomic counter consistent.
+    #[test]
+    fn test_restore_from_updates_counter() {
+        let src = OverlayDictionary::new();
+        src.add_simple("東京", "トウキョウ", "トーキョー", 5000);
+        src.add_simple("大阪", "オオサカ", "オオサカ", 5000);
+
+        let snap = src.snapshot();
+        assert_eq!(snap.len(), 2);
+
+        let dst = OverlayDictionary::new();
+        assert!(dst.is_empty());
+        dst.restore_from(snap);
+        assert_eq!(dst.len(), 2);
+        assert!(!dst.is_empty());
     }
 }

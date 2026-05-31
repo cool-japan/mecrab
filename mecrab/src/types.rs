@@ -91,6 +91,217 @@ impl Morpheme {
     pub fn end_char(&self, text: &str) -> usize {
         text[..self.end_byte].chars().count()
     }
+
+    // ── IPADIC structured feature accessors ──────────────────────────────────
+
+    /// Top-level part-of-speech (field 0: 品詞), e.g. `"名詞"`, `"動詞"`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn pos(&self) -> Option<&str> {
+        self.feature_field(0)
+    }
+
+    /// First POS sub-classification (field 1: 品詞細分類1), e.g. `"固有名詞"`, `"自立"`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn pos_detail(&self) -> Option<&str> {
+        self.feature_field(1)
+    }
+
+    /// Second POS sub-classification (field 2: 品詞細分類2).
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn pos_detail2(&self) -> Option<&str> {
+        self.feature_field(2)
+    }
+
+    /// Third POS sub-classification (field 3: 品詞細分類3).
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn pos_detail3(&self) -> Option<&str> {
+        self.feature_field(3)
+    }
+
+    /// Conjugation type (field 4: 活用型), e.g. `"五段・カ行"`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn conjugation_type(&self) -> Option<&str> {
+        self.feature_field(4)
+    }
+
+    /// Conjugation form (field 5: 活用形), e.g. `"基本形"`, `"連用形"`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn conjugation_form(&self) -> Option<&str> {
+        self.feature_field(5)
+    }
+
+    /// Dictionary / base form (field 6: 原形 / lemma), e.g. `"読む"` for `"読んで"`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn base_form(&self) -> Option<&str> {
+        self.feature_field(6)
+    }
+
+    /// Alias for [`base_form`](Self::base_form).
+    #[must_use]
+    pub fn lemma(&self) -> Option<&str> {
+        self.base_form()
+    }
+
+    /// Katakana reading (field 7: 読み), e.g. `"トウキョウ"`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn reading(&self) -> Option<&str> {
+        self.feature_field(7)
+    }
+
+    /// Pronunciation from the IPADIC feature string (field 8: 発音).
+    ///
+    /// Different from [`pronunciation`](Self::pronunciation) which holds the
+    /// IPA transcription populated when `ipa_enabled = true`.
+    ///
+    /// Returns `None` when the field is absent or equals `*`.
+    #[must_use]
+    pub fn pronunciation_feature(&self) -> Option<&str> {
+        self.feature_field(8)
+    }
+
+    /// Return field `n` of the comma-separated IPADIC feature string,
+    /// or `None` when the field is absent, empty, or equals `"*"`.
+    fn feature_field(&self, n: usize) -> Option<&str> {
+        if self.feature.is_empty() {
+            return None;
+        }
+        let val = self.feature.split(',').nth(n)?;
+        if val == "*" || val.is_empty() {
+            None
+        } else {
+            Some(val)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Build a minimal `Morpheme` for unit tests without filesystem access.
+    fn make_morpheme(surface: &str, feature: &str) -> Morpheme {
+        Morpheme {
+            surface: surface.to_owned(),
+            word_id: 0,
+            pos_id: 0,
+            wcost: 0,
+            feature: feature.to_owned(),
+            entities: vec![],
+            pronunciation: None,
+            embedding: None,
+            start_byte: 0,
+            end_byte: surface.len(),
+        }
+    }
+
+    /// Standard IPADIC feature string for 東京 (proper noun, place).
+    const TOKYO_FEATURE: &str =
+        "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ";
+
+    /// Standard IPADIC feature string for 読んで (verb in gerund form).
+    const YONDE_FEATURE: &str =
+        "動詞,自立,*,*,五段・マ行,連用タ接続,読む,ヨンデ,ヨンデ";
+
+    #[test]
+    fn test_pos_returns_first_field() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        assert_eq!(m.pos(), Some("名詞"));
+    }
+
+    #[test]
+    fn test_pos_detail_returns_second_field() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        assert_eq!(m.pos_detail(), Some("固有名詞"));
+    }
+
+    #[test]
+    fn test_pos_detail2_and_detail3() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        assert_eq!(m.pos_detail2(), Some("地域"));
+        assert_eq!(m.pos_detail3(), Some("一般"));
+    }
+
+    #[test]
+    fn test_star_fields_return_none() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        // fields 4 and 5 are `*` for a proper noun
+        assert_eq!(m.conjugation_type(), None, "field 4 is * → None");
+        assert_eq!(m.conjugation_form(), None, "field 5 is * → None");
+    }
+
+    #[test]
+    fn test_base_form_and_lemma_alias() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        assert_eq!(m.base_form(), Some("東京"));
+        assert_eq!(m.lemma(), Some("東京"), "lemma() must alias base_form()");
+    }
+
+    #[test]
+    fn test_reading() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        assert_eq!(m.reading(), Some("トウキョウ"));
+    }
+
+    #[test]
+    fn test_pronunciation_feature() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        assert_eq!(m.pronunciation_feature(), Some("トウキョウ"));
+    }
+
+    #[test]
+    fn test_conjugation_fields_on_verb() {
+        let m = make_morpheme("読んで", YONDE_FEATURE);
+        assert_eq!(m.conjugation_type(), Some("五段・マ行"));
+        assert_eq!(m.conjugation_form(), Some("連用タ接続"));
+        assert_eq!(m.base_form(), Some("読む"));
+    }
+
+    #[test]
+    fn test_feature_field_out_of_bounds_returns_none() {
+        let m = make_morpheme("東京", TOKYO_FEATURE);
+        // TOKYO_FEATURE has 9 fields (indices 0–8); index 99 must return None.
+        assert_eq!(m.feature_field(99), None);
+    }
+
+    #[test]
+    fn test_feature_field_on_empty_feature() {
+        let m = make_morpheme("？", "");
+        // An empty feature string has no fields at all.
+        assert_eq!(m.pos(), None);
+        assert_eq!(m.reading(), None);
+    }
+
+    #[test]
+    fn test_all_star_feature_returns_none_for_every_accessor() {
+        // Simulate a synthetic entry where every field is `*`.
+        let m = make_morpheme("X", "*,*,*,*,*,*,*,*,*");
+        assert_eq!(m.pos(), None);
+        assert_eq!(m.pos_detail(), None);
+        assert_eq!(m.pos_detail2(), None);
+        assert_eq!(m.pos_detail3(), None);
+        assert_eq!(m.conjugation_type(), None);
+        assert_eq!(m.conjugation_form(), None);
+        assert_eq!(m.base_form(), None);
+        assert_eq!(m.lemma(), None);
+        assert_eq!(m.reading(), None);
+        assert_eq!(m.pronunciation_feature(), None);
+    }
 }
 
 impl fmt::Display for Morpheme {
