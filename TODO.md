@@ -366,3 +366,39 @@
 - [x] `feature: String → Arc<str>` interning refactor (eliminates K feature allocations per parse; DictionaryEntry + LatticeNode; Morpheme.feature stays String)
 - [x] Dictionary cost training loop with matrix update + binary write-back (TrainingMatrix, DictTrainConfig, train_dict, MeCrab::train_dict())
 - [x] `kizame train` command consuming annotated TSV corpus
+
+## v0.3.6 Additions (2026-05-31)
+
+### Completed
+
+#### Correctness (Critical)
+- [x] **`resolve_ids` wired into training** (`viterbi/train_loop.rs`): `train_dict` now calls `GoldSegmentation::resolve_ids(dict)` before each training run; without this `kizame train` was a near-no-op (all empirical connection counts collapsed to `(0,0)`).
+- [x] **Word-cost gradients applied** (`viterbi/train.rs`, `viterbi/train_loop.rs`): added `apply_word_gradient_update`; `run_epoch` now updates both connection-matrix costs and word-cost deltas per batch. The full CRF objective (connection costs + word costs) is trained and persisted.
+
+#### Performance
+- [x] **Dead O(N²) Viterbi predecessor rescan removed** (`viterbi/mod.rs`): `for check_pos in 1..prev_pos` in `forward_pass` and `nbest_exact` is provably unreachable (lattice invariant: node ending at byte `e` is always at slot `e+1`). Replaced with documenting `debug_assert!`. Reduces forward pass from O(N²×K) to O(N×K).
+
+#### Training
+- [x] **Word-cost delta model** (`TrainingMatrix`): `word_cost_deltas` field, `apply_word_gradient`, `word_cost_deltas_i16`, `write_word_costs(path)`, `to_bytes()` (in-memory binary). `read_word_costs(path)` parses delta TSV.
+- [x] **LR linear decay** (`DictTrainConfig::min_learning_rate`, `compute_effective_lr`). `EpochStats::effective_lr` records actual LR per epoch.
+- [x] **Boundary-F1 evaluation helper** (`boundary_f1`): precision/recall/F1 over morpheme end-byte boundaries; re-exported from crate root.
+- [x] **Word-cost override map in Dictionary** (`set_word_cost_overrides`, `load_word_cost_overrides`): thread-safe; empty-override path is byte-identical to pre-change code.
+- [x] **`kizame train` validation** (`commands/train.rs`): `--dev-ratio`, `--min-lr`, `--require-improvement`, `--output-word-costs`. Baseline vs trained dev F1 reporting; hot-reload via `MeCrab::from_bytes`; regression guard writes `.candidate` instead of primary output.
+
+#### CLI
+- [x] **`kizame parse --force-span start:end`**: forces byte spans to single tokens via existing `ParseConstraints` API.
+- [x] **`kizame parse --bunsetsu`**: outputs bunsetsu chunks from `AnalysisResult::bunsetsu()`.
+
+#### HTTP Server
+- [x] **Server N-best** (`server.rs`): `nbest` field in `ParseRequest` is now honoured; returns `{ "results": [...] }` array for `n>1`.
+
+#### word2vec
+- [x] **In-process query API** (`Word2Vec`): `get_vector`, `similarity`, `most_similar`, `most_similar_by_vec`, `analogy`, surface-string convenience wrappers.
+- [x] **`Word2Vec::load_text(path)`**: full model reload from text format; `Vocabulary::from_word_id_list` helper added.
+
+### Planned (future rounds)
+- [ ] Lattice `nodes_at: Vec<Vec<_>>` → CSR flat layout (requires constrained-parse mutation model rework; bit-identical-output revalidation)
+- [ ] AdaGrad / L-BFGS optimizer for CRF training (plain SGD converges slowly; MeCab uses OWL-QN)
+- [ ] `kizame parse -p <file>` partial-parse constraint file (surface-per-line MeCab `-p` format)
+- [ ] GPU parity validation (hardware-blocked — requires real wgpu adapter)
+- [ ] "5x vs MeCab" benchmark (IPADIC-blocked — needs real dictionary install)

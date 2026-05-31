@@ -217,10 +217,64 @@ async fn health(State(_state): State<AppState>) -> Json<HealthResponse> {
     })
 }
 
+/// Convert a single `AnalysisResult` into the appropriate `ParseResponseBody`
+/// for the given format.
+fn result_to_response_body(
+    result: &mecrab::AnalysisResult,
+    format: &ParseFormat,
+    time_us: u64,
+) -> ParseResponseBody {
+    match format {
+        ParseFormat::Json => ParseResponseBody::Tokens {
+            tokens: build_tokens(result),
+            time_us,
+        },
+        ParseFormat::Wakati => ParseResponseBody::Wakati {
+            wakati: build_wakati_string(result),
+            time_us,
+        },
+        ParseFormat::Dump => ParseResponseBody::Dump {
+            dump: build_dump_string(result),
+            time_us,
+        },
+        ParseFormat::Conllu => ParseResponseBody::Conllu {
+            conllu: build_conllu_string(result),
+            time_us,
+        },
+    }
+}
+
+/// Serialize an `AnalysisResult` as a `serde_json::Value` matching the
+/// `ParseResponseBody` shape, minus the `time_us` field (used in N-best arrays).
+fn result_to_json_value(result: &mecrab::AnalysisResult, format: &ParseFormat) -> serde_json::Value {
+    match format {
+        ParseFormat::Json => {
+            let tokens: Vec<serde_json::Value> = result
+                .morphemes
+                .iter()
+                .map(|m| {
+                    serde_json::json!({
+                        "surface": m.surface,
+                        "feature": m.feature,
+                    })
+                })
+                .collect();
+            serde_json::json!({ "tokens": tokens })
+        }
+        ParseFormat::Wakati => serde_json::json!({ "wakati": build_wakati_string(result) }),
+        ParseFormat::Dump => serde_json::json!({ "dump": build_dump_string(result) }),
+        ParseFormat::Conllu => serde_json::json!({ "conllu": build_conllu_string(result) }),
+    }
+}
+
 /// POST /parse - Parse single text
 ///
 /// Supports an optional `?format=json|wakati|dump` query parameter and/or a
 /// `"format"` field in the JSON body.  Query param takes precedence.
+///
+/// When `nbest` is set to a value > 1, the response is a JSON object:
+/// `{ "results": [...], "time_us": N }` where each element of `results`
+/// matches the single-parse response shape (without `time_us`).
 async fn parse(
     State(state): State<AppState>,
     Query(query): Query<FormatQuery>,
@@ -230,10 +284,44 @@ async fn parse(
 
     let format = resolve_format(req.format.as_deref(), query.format.as_deref())?;
 
-    // N-best is noted but currently uses regular parse (single-best).
-    // The format selection below applies regardless.
-    let _ = req.nbest; // reserved for future N-best support
+    // Branch on N-best: if nbest > 1 return an array of results, otherwise
+    // fall through to the standard single-parse path.
+    if let Some(n) = req.nbest.filter(|&n| n > 1) {
+        let paths = state
+            .mecrab
+            .parse_nbest(&req.text, n)
+            .map_err(|e| ApiError::Parse(e.to_string()))?;
 
+        let elapsed = start.elapsed();
+        let time_us = elapsed.as_micros() as u64;
+
+        let result_values: Vec<serde_json::Value> = paths
+            .iter()
+            .map(|(result, cost)| {
+                let mut val = result_to_json_value(result, &format);
+                // Attach the path cost alongside the morphological data.
+                if let serde_json::Value::Object(ref mut map) = val {
+                    map.insert("cost".to_owned(), serde_json::Value::Number((*cost).into()));
+                }
+                val
+            })
+            .collect();
+
+        let nbest_body = serde_json::json!({
+            "results": result_values,
+            "time_us": time_us,
+        });
+
+        return Ok(Json(serde_json::Value::Object(
+            nbest_body
+                .as_object()
+                .cloned()
+                .unwrap_or_default(),
+        ))
+        .into_response());
+    }
+
+    // Standard single-parse path (nbest = None or Some(1)).
     let result = state
         .mecrab
         .parse(&req.text)
@@ -242,26 +330,9 @@ async fn parse(
     let elapsed = start.elapsed();
     let time_us = elapsed.as_micros() as u64;
 
-    let body = match format {
-        ParseFormat::Json => ParseResponseBody::Tokens {
-            tokens: build_tokens(&result),
-            time_us,
-        },
-        ParseFormat::Wakati => ParseResponseBody::Wakati {
-            wakati: build_wakati_string(&result),
-            time_us,
-        },
-        ParseFormat::Dump => ParseResponseBody::Dump {
-            dump: build_dump_string(&result),
-            time_us,
-        },
-        ParseFormat::Conllu => ParseResponseBody::Conllu {
-            conllu: build_conllu_string(&result),
-            time_us,
-        },
-    };
+    let body = result_to_response_body(&result, &format, time_us);
 
-    Ok(Json(body))
+    Ok(Json(body).into_response())
 }
 
 /// POST /parse/batch - Parse multiple texts
@@ -374,4 +445,137 @@ pub async fn run_server(
     axum::serve(listener, app).await?;
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── ParseRequest deserialization ─────────────────────────────────────────
+
+    #[test]
+    fn test_parse_request_nbest_none_deserializes() {
+        let json = r#"{"text": "東京"}"#;
+        let req: ParseRequest = serde_json::from_str(json).expect("deserialize");
+        assert!(req.nbest.is_none());
+    }
+
+    #[test]
+    fn test_parse_request_nbest_some_deserializes() {
+        let json = r#"{"text": "東京", "nbest": 5}"#;
+        let req: ParseRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.nbest, Some(5));
+    }
+
+    #[test]
+    fn test_parse_request_nbest_one_deserializes() {
+        let json = r#"{"text": "東京", "nbest": 1}"#;
+        let req: ParseRequest = serde_json::from_str(json).expect("deserialize");
+        assert_eq!(req.nbest, Some(1));
+    }
+
+    // ── N-best branching logic ───────────────────────────────────────────────
+
+    /// `nbest = None` must NOT trigger the N-best branch (`filter(|&n| n > 1)` → None).
+    #[test]
+    fn test_nbest_field_ignored_when_none() {
+        let nbest: Option<usize> = None;
+        // Mirrors the branch condition used in the parse handler.
+        let triggers_nbest = nbest.filter(|&n| n > 1).is_some();
+        assert!(!triggers_nbest, "nbest=None must not trigger N-best path");
+    }
+
+    /// `nbest = Some(1)` must NOT trigger the N-best branch — single-parse path.
+    #[test]
+    fn test_nbest_one_same_as_single() {
+        let nbest: Option<usize> = Some(1);
+        let triggers_nbest = nbest.filter(|&n| n > 1).is_some();
+        assert!(
+            !triggers_nbest,
+            "nbest=Some(1) must use the single-parse path"
+        );
+    }
+
+    /// `nbest = Some(2)` triggers the N-best branch.
+    #[test]
+    fn test_nbest_two_triggers_nbest_path() {
+        let nbest: Option<usize> = Some(2);
+        let triggers_nbest = nbest.filter(|&n| n > 1).is_some();
+        assert!(triggers_nbest, "nbest=Some(2) must use the N-best path");
+    }
+
+    // ── resolve_format ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_resolve_format_defaults_to_json() {
+        let fmt = resolve_format(None, None).ok();
+        assert_eq!(fmt, Some(ParseFormat::Json));
+    }
+
+    #[test]
+    fn test_resolve_format_body_wakati() {
+        let fmt = resolve_format(Some("wakati"), None).ok();
+        assert_eq!(fmt, Some(ParseFormat::Wakati));
+    }
+
+    #[test]
+    fn test_resolve_format_query_wins_over_body() {
+        // Body says "dump", query says "wakati" → query wins.
+        let fmt = resolve_format(Some("dump"), Some("wakati")).ok();
+        assert_eq!(fmt, Some(ParseFormat::Wakati));
+    }
+
+    #[test]
+    fn test_resolve_format_unknown_returns_error() {
+        let result = resolve_format(Some("unknown_fmt"), None);
+        assert!(result.is_err(), "unknown format must produce an error");
+    }
+
+    // ── result_to_json_value ─────────────────────────────────────────────────
+
+    fn make_analysis_result() -> mecrab::AnalysisResult {
+        let morphemes = vec![mecrab::Morpheme {
+            surface: "東京".to_owned(),
+            word_id: 1,
+            pos_id: 0,
+            wcost: 0,
+            feature: "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ".to_owned(),
+            entities: vec![],
+            pronunciation: None,
+            embedding: None,
+            start_byte: 0,
+            end_byte: 6,
+        }];
+        mecrab::AnalysisResult::new(morphemes, mecrab::OutputFormat::Default)
+    }
+
+    #[test]
+    fn test_result_to_json_value_json_format_has_tokens_key() {
+        let result = make_analysis_result();
+        let val = result_to_json_value(&result, &ParseFormat::Json);
+        assert!(
+            val.get("tokens").is_some(),
+            "JSON format must produce a 'tokens' key"
+        );
+    }
+
+    #[test]
+    fn test_result_to_json_value_wakati_format_has_wakati_key() {
+        let result = make_analysis_result();
+        let val = result_to_json_value(&result, &ParseFormat::Wakati);
+        assert!(
+            val.get("wakati").is_some(),
+            "Wakati format must produce a 'wakati' key"
+        );
+    }
+
+    #[test]
+    fn test_result_to_json_value_dump_format_has_dump_key() {
+        let result = make_analysis_result();
+        let val = result_to_json_value(&result, &ParseFormat::Dump);
+        assert!(
+            val.get("dump").is_some(),
+            "Dump format must produce a 'dump' key"
+        );
+    }
 }

@@ -437,6 +437,23 @@ pub fn apply_conn_gradient_update(
     }
 }
 
+/// Apply word-cost gradient updates, accumulating into a delta map.
+///
+/// `deltas[word_id]` tracks the total f64 adjustment to be applied to that
+/// word's wcost (negative = decrease cost = favor this word).
+/// The update rule: `delta[word_id] -= learning_rate * grad`.
+///
+/// Note: the delta is in f64 space and is later rounded to i16 when persisted.
+pub fn apply_word_gradient_update<S: std::hash::BuildHasher>(
+    deltas: &mut HashMap<u32, f64, S>,
+    gradient: &CrfGradient,
+    learning_rate: f64,
+) {
+    for (&word_id, &grad) in &gradient.word_gradients {
+        *deltas.entry(word_id).or_insert(0.0) -= learning_rate * grad;
+    }
+}
+
 // ── Edge marginals (package-private helper) ───────────────────────────────────
 //
 // Used internally by compute_sentence_gradient; also exposed so that fb.rs can

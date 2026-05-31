@@ -2,7 +2,42 @@
 
 All notable changes to this project will be documented in this file.
 
-## [Unreleased] — v0.3.5
+## [Unreleased] — v0.3.6
+
+### Fixed (Critical — CRF training correctness)
+
+- **`resolve_ids` now called before training** (`viterbi/train_loop.rs`): `train_dict` clones the corpus and calls `GoldSegmentation::resolve_ids(dict)` on every sentence before the epoch loop. Without this fix, all empirical connection counts collapsed to the degenerate key `(0,0)` — `kizame train` was effectively a no-op. This is the single highest-leverage correctness fix in the project.
+- **Word-cost gradients are now applied** (`viterbi/train.rs`, `viterbi/train_loop.rs`): `compute_sentence_gradient` always computed `add_word(word_id, delta)` but the update function only read `conn_gradients`. Added `apply_word_gradient_update` and wired it into `run_epoch` via `TrainingMatrix::apply_word_gradient`. The full CRF objective (connection costs + word costs) is now trained and persisted. `apply_l2` also regularizes accumulated word deltas.
+
+### Fixed (Performance — dead O(N²) Viterbi loop removed)
+
+- **Dead O(N²) predecessor rescan eliminated** (`viterbi/mod.rs`): the `for check_pos in 1..prev_pos` secondary loop in `forward_pass` (and its mirror in `nbest_exact`) is provably unreachable — the lattice invariant stores every node ending at byte `e` at exactly index `e+1`, and the primary scan at `node.start + 1` already reads that slot. The loop's guard `cold.node.end == node.start` can never fire. Both dead loops are replaced with documenting `debug_assert!` blocks. Reduces the forward pass from O(N²×K) to O(N×K).
+
+### Added — Training
+
+- **Word-cost delta model** (`viterbi/train_loop.rs`): `TrainingMatrix` gains a `word_cost_deltas: HashMap<u32,f64>` field, `apply_word_gradient()`, `word_cost_deltas_i16()`, `write_word_costs(path)` (TSV: `word_id\tdelta_i16`), and `to_bytes()` (in-memory binary for hot-reload). `read_word_costs(path)` parses a delta TSV back to a `HashMap<u32,i16>`.
+- **LR decay** (`viterbi/train_loop.rs`): `DictTrainConfig::min_learning_rate` (default `0.0`). When `> 0`, `run_epoch` uses a linearly-decayed effective LR (epoch 0 = `learning_rate`, last epoch = `min_learning_rate`). `EpochStats::effective_lr` records the actual LR used. `compute_effective_lr()` is public for testing.
+- **Boundary-F1 evaluation helper** (`viterbi/train_loop.rs`): `boundary_f1(predicted_ends, gold) -> (precision, recall, f1)` computes morpheme boundary-level precision/recall/F1. Re-exported from the crate root as `mecrab::boundary_f1`.
+- **Word-cost override map** (`dict/mod.rs`): `Dictionary::set_word_cost_overrides(HashMap<u32,i16>)` and `load_word_cost_overrides(path)` — thread-safe (mirrors the empty-overlay lock-free fast path: `override_count == 0` → lookup is byte-identical to the pre-change code path). `MeCrab::set_word_cost_overrides` and `load_word_cost_overrides` delegate to the live dictionary.
+- **`kizame train` validation and new flags**: `--dev-ratio` (held-out split), `--min-lr` (LR decay floor), `--require-improvement` (refuse to overwrite output if dev F1 didn't improve — writes to `.candidate` instead), `--output-word-costs` (persist word-cost TSV). Flow: baseline dev F1 → train → hot-reload trained matrix via `MeCrab::from_bytes` → trained dev F1 → report delta → conditional write.
+
+### Added — CLI (kizame parse)
+
+- **`--force-span start:end`** (repeatable): forces a byte span to be a single token via the existing `MeCrab::parse_with_constraints` / `ParseConstraints` API. Multiple spans may be specified.
+- **`--bunsetsu`**: after parsing, calls `AnalysisResult::bunsetsu()` and prints one bunsetsu per line (`SURFACE\t[morph1 morph2 ...]`). Warns to stderr if combined with `-O`/`-F` (bunsetsu output takes priority).
+
+### Added — HTTP server
+
+- **Server N-best** (`kizame/src/server.rs`): the `nbest` field in `ParseRequest` is now honoured. When `nbest > 1`, the handler calls `parse_nbest` and returns `{ "results": [...], "time_us": N }` (array of single-parse JSON objects with `"cost"` field). Single-parse path (`nbest = None` or `Some(1)`) is unchanged.
+
+### Added — word2vec (`mecrab-word2vec`)
+
+- **In-process similarity/analogy query API**: `get_vector(word_id)`, `similarity(a,b)`, `most_similar(word_id,k)`, `most_similar_by_vec(query,k,exclude)`, `analogy(a,b,c,k)`. When a surface map is attached: `similarity_by_surface`, `most_similar_by_surface`.
+- **`Word2Vec::load_text(path)`**: full model reload from the text format written by `save_text`. Reconstructs `syn0`, vocabulary (identity-mapped via `Vocabulary::from_word_id_list`), and surface map. Supports all query methods immediately after loading. `syn1neg`/`syn_ng` are left empty (not saved in text format).
+
+---
+
+## [Previous] — v0.3.5
 
 ### Performance
 

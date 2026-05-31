@@ -5,7 +5,7 @@
 use crate::commands::{Format, colors, pos_color};
 use clap::{Args, ValueEnum};
 use mecrab::api::format::format_lattice_prob;
-use mecrab::{IpadicProvider, MeCrab, NeologdProvider, OutputFormat, UnidicProvider};
+use mecrab::{IpadicProvider, MeCrab, NeologdProvider, OutputFormat, ParseConstraints, UnidicProvider};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -87,6 +87,15 @@ pub struct ParseArgs {
     #[arg(short = 'n', long)]
     pub nbest: Option<usize>,
 
+    /// Force specific byte spans to be single tokens. Format: "start:end" (byte offsets).
+    /// May be repeated: --force-span 0:3 --force-span 6:9
+    #[arg(long = "force-span", value_name = "START:END", action = clap::ArgAction::Append)]
+    pub force_spans: Vec<String>,
+
+    /// Output bunsetsu (文節) phrase chunks instead of morphemes.
+    #[arg(long = "bunsetsu")]
+    pub bunsetsu: bool,
+
     /// Enable color output (auto-detected for terminals)
     #[arg(short = 'c', long)]
     pub color: bool,
@@ -102,6 +111,48 @@ pub struct ParseArgs {
     /// Output file (writes to stdout if not specified)
     #[arg(short = 'o', long)]
     pub output: Option<PathBuf>,
+}
+
+/// Parse a `"start:end"` span string into `(usize, usize)`.
+///
+/// Returns an error message if the string is malformed or the offsets are
+/// out of order.
+fn parse_span_str(s: &str) -> Result<(usize, usize), String> {
+    let (start_s, end_s) = s
+        .split_once(':')
+        .ok_or_else(|| format!("invalid span '{}': expected format START:END", s))?;
+    let start = start_s
+        .parse::<usize>()
+        .map_err(|_| format!("invalid span '{}': '{}' is not a valid byte offset", s, start_s))?;
+    let end = end_s
+        .parse::<usize>()
+        .map_err(|_| format!("invalid span '{}': '{}' is not a valid byte offset", s, end_s))?;
+    if start >= end {
+        return Err(format!(
+            "invalid span '{}': start ({}) must be less than end ({})",
+            s, start, end
+        ));
+    }
+    Ok((start, end))
+}
+
+/// Write bunsetsu (文節) chunks for a parse result, one per line.
+///
+/// Format: `SURFACE\t[morph1 morph2 ...]`
+/// Followed by `EOS`.
+fn write_bunsetsu_result<W: Write>(
+    w: &mut W,
+    result: &mecrab::AnalysisResult,
+) -> io::Result<()> {
+    let chunks = result.bunsetsu();
+    for chunk in &chunks {
+        let morph_surfaces: Vec<&str> = result.morphemes[chunk.morpheme_range.clone()]
+            .iter()
+            .map(|m| m.surface.as_str())
+            .collect();
+        writeln!(w, "{}\t[{}]", chunk.surface, morph_surfaces.join(" "))?;
+    }
+    writeln!(w, "EOS")
 }
 
 pub fn run_parse(args: ParseArgs) -> Result<(), Box<dyn std::error::Error>> {
@@ -131,6 +182,18 @@ pub fn run_parse(args: ParseArgs) -> Result<(), Box<dyn std::error::Error>> {
         DictFormatArg::Unidic => builder.with_provider(UnidicProvider).build()?,
         DictFormatArg::Neologd => builder.with_provider(NeologdProvider).build()?,
     };
+
+    // Parse forced-span strings once (not inside the hot loop).
+    let forced_spans: Vec<(usize, usize)> = args
+        .force_spans
+        .iter()
+        .map(|s| parse_span_str(s).map_err(|e| -> Box<dyn std::error::Error> { e.into() }))
+        .collect::<Result<Vec<_>, _>>()?;
+
+    // Warn if --bunsetsu is combined with -O or -F (bunsetsu takes priority).
+    if args.bunsetsu && (args.node_format.is_some() || args.output_format != Format::Default || args.wakati) {
+        eprintln!("warning: --bunsetsu takes priority over -O/-F/--wakati output flags");
+    }
 
     // Determine input source
     let input: Box<dyn BufRead> = match &args.input {
@@ -230,10 +293,22 @@ pub fn run_parse(args: ParseArgs) -> Result<(), Box<dyn std::error::Error>> {
             let (result, probs) = mecrab.parse_with_probs(&line)?;
             writeln!(output, "{}", format_lattice_prob(&result, &probs))?;
         } else {
-            let result = mecrab.parse(&line)?;
+            // Choose parse path: constrained (forced spans) or unconstrained.
+            let result = if forced_spans.is_empty() {
+                mecrab.parse(&line)?
+            } else {
+                let mut constraints = ParseConstraints::new();
+                for &(start, end) in &forced_spans {
+                    constraints.add_span(start, end, None);
+                }
+                mecrab.parse_with_constraints(&line, &constraints)?
+            };
 
-            // Special handling for wakati-word-id mode (for Word2Vec training)
-            if args.wakati_word_id {
+            // --bunsetsu takes priority over all other format flags.
+            if args.bunsetsu {
+                write_bunsetsu_result(&mut output, &result)?;
+            } else if args.wakati_word_id {
+                // Special handling for wakati-word-id mode (for Word2Vec training)
                 let word_ids: Vec<String> = result
                     .morphemes
                     .iter()
@@ -277,4 +352,133 @@ pub fn write_colored_result<W: Write>(
         writeln!(w)?;
     }
     writeln!(w, "{}EOS{}", colors::DIM, colors::RESET)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // ── parse_span_str ────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_parse_force_span_string_parsing_valid() {
+        let result = parse_span_str("3:6");
+        assert_eq!(result, Ok((3usize, 6usize)));
+    }
+
+    #[test]
+    fn test_parse_force_span_string_parsing_zero_start() {
+        let result = parse_span_str("0:9");
+        assert_eq!(result, Ok((0usize, 9usize)));
+    }
+
+    #[test]
+    fn test_parse_force_span_string_parsing_invalid_alpha() {
+        let result = parse_span_str("abc");
+        assert!(result.is_err(), "non-numeric span string must fail");
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("expected format START:END"),
+            "error message should mention expected format, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_force_span_string_parsing_invalid_start() {
+        let result = parse_span_str("abc:6");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("abc"),
+            "error message should name the bad token, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_force_span_string_parsing_invalid_end() {
+        let result = parse_span_str("3:xyz");
+        assert!(result.is_err());
+        let msg = result.unwrap_err();
+        assert!(
+            msg.contains("xyz"),
+            "error message should name the bad token, got: {msg}"
+        );
+    }
+
+    #[test]
+    fn test_parse_force_span_string_parsing_equal_offsets() {
+        // start must be strictly less than end
+        let result = parse_span_str("5:5");
+        assert!(result.is_err(), "start == end must be rejected");
+    }
+
+    #[test]
+    fn test_parse_force_span_string_parsing_inverted_offsets() {
+        // start > end is invalid
+        let result = parse_span_str("9:3");
+        assert!(result.is_err(), "start > end must be rejected");
+    }
+
+    // ── write_bunsetsu_result ─────────────────────────────────────────────────
+
+    /// Build a minimal `Morpheme` without a real dictionary.
+    fn make_morpheme(
+        surface: &str,
+        feature: &str,
+        start_byte: usize,
+        end_byte: usize,
+    ) -> mecrab::Morpheme {
+        mecrab::Morpheme {
+            surface: surface.to_owned(),
+            word_id: 0,
+            pos_id: 0,
+            wcost: 0,
+            feature: feature.to_owned(),
+            entities: vec![],
+            pronunciation: None,
+            embedding: None,
+            start_byte,
+            end_byte,
+        }
+    }
+
+    #[test]
+    fn test_bunsetsu_format_nonempty() {
+        // 私は本を読む — three bunsetsu expected:
+        //   "私は"  [私 は]
+        //   "本を"  [本 を]
+        //   "読む"  [読む]
+        let morphemes = vec![
+            make_morpheme("私", "名詞,代名詞,一般,*,*,*,私,ワタシ,ワタシ", 0, 3),
+            make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ", 3, 6),
+            make_morpheme("本", "名詞,一般,*,*,*,*,本,ホン,ホン", 6, 9),
+            make_morpheme("を", "助詞,格助詞,一般,*,*,*,を,ヲ,ヲ", 9, 12),
+            make_morpheme("読む", "動詞,自立,*,*,五段・マ行,基本形,読む,ヨム,ヨム", 12, 24),
+        ];
+        let result = mecrab::AnalysisResult::new(morphemes, mecrab::OutputFormat::Default);
+
+        let mut buf = Vec::new();
+        write_bunsetsu_result(&mut buf, &result).expect("write should succeed");
+        let output = String::from_utf8(buf).expect("valid UTF-8");
+
+        // Three bunsetsu lines + EOS
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 4, "expected 3 bunsetsu + EOS, got: {output}");
+        assert_eq!(lines[0], "私は\t[私 は]");
+        assert_eq!(lines[1], "本を\t[本 を]");
+        assert_eq!(lines[2], "読む\t[読む]");
+        assert_eq!(lines[3], "EOS");
+    }
+
+    #[test]
+    fn test_bunsetsu_format_empty_morphemes() {
+        let result = mecrab::AnalysisResult::new(vec![], mecrab::OutputFormat::Default);
+        let mut buf = Vec::new();
+        write_bunsetsu_result(&mut buf, &result).expect("write should succeed");
+        let output = String::from_utf8(buf).expect("valid UTF-8");
+        // No bunsetsu chunks; just the trailing EOS line.
+        let lines: Vec<&str> = output.lines().collect();
+        assert_eq!(lines.len(), 1);
+        assert_eq!(lines[0], "EOS");
+    }
 }

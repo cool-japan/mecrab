@@ -8,6 +8,22 @@ use std::collections::HashMap;
 use std::path::Path;
 use std::sync::Arc;
 
+/// Compute the cosine similarity between two equal-length float slices.
+///
+/// Returns `0.0` if either vector has zero norm (avoids division by zero).
+#[inline]
+fn cosine_similarity(a: &[f32], b: &[f32]) -> f32 {
+    debug_assert_eq!(a.len(), b.len());
+    let dot: f32 = a.iter().zip(b.iter()).map(|(x, y)| x * y).sum();
+    let norm_a: f32 = a.iter().map(|x| x * x).sum::<f32>().sqrt();
+    let norm_b: f32 = b.iter().map(|x| x * x).sum::<f32>().sqrt();
+    if norm_a == 0.0 || norm_b == 0.0 {
+        0.0
+    } else {
+        dot / (norm_a * norm_b)
+    }
+}
+
 /// Training objective for word2vec.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum TrainingObjective {
@@ -357,6 +373,282 @@ impl Word2Vec {
             }
         }
     }
+
+    // ── Query API ────────────────────────────────────────────────────────────
+
+    /// Return the syn0 embedding slice for `word_id`, or `None` if not in vocabulary.
+    ///
+    /// `word_id` is the ORIGINAL word id (as in the corpus vocabulary),
+    /// not the internal remapped (dense training) index.
+    pub fn get_vector(&self, word_id: u32) -> Option<&[f32]> {
+        let remapped = self.vocab.get_remapped_id(word_id)?;
+        let vs = self.config.vector_size;
+        let start = remapped as usize * vs;
+        self.syn0.get(start..start + vs)
+    }
+
+    /// Cosine similarity between two words identified by their original `word_id`.
+    ///
+    /// Returns `None` if either word is out-of-vocabulary.
+    pub fn similarity(&self, a: u32, b: u32) -> Option<f32> {
+        Some(cosine_similarity(self.get_vector(a)?, self.get_vector(b)?))
+    }
+
+    /// Return the top-`k` most similar words to `word_id` (excluding itself).
+    ///
+    /// Results are `(word_id, cosine_similarity)` pairs sorted in descending order.
+    /// Returns an empty `Vec` if `word_id` is out-of-vocabulary or `k == 0`.
+    pub fn most_similar(&self, word_id: u32, k: usize) -> Vec<(u32, f32)> {
+        if k == 0 {
+            return Vec::new();
+        }
+        let query = match self.get_vector(word_id) {
+            Some(v) => v,
+            None => return Vec::new(),
+        };
+        self.most_similar_by_vec(query, k, Some(word_id))
+    }
+
+    /// Return the top-`k` most similar words to an arbitrary query vector.
+    ///
+    /// `exclude_id`: optional original `word_id` to exclude from results
+    /// (useful to exclude the query word itself when the vector comes from the model).
+    ///
+    /// Returns an empty `Vec` if `query.len() != vector_size` or `k == 0`.
+    pub fn most_similar_by_vec(
+        &self,
+        query: &[f32],
+        k: usize,
+        exclude_id: Option<u32>,
+    ) -> Vec<(u32, f32)> {
+        let vs = self.config.vector_size;
+        if query.len() != vs || k == 0 {
+            return Vec::new();
+        }
+
+        let exclude_remapped: Option<u32> =
+            exclude_id.and_then(|id| self.vocab.get_remapped_id(id));
+
+        let mut scores: Vec<(u32, f32)> = (0..self.vocab.len() as u32)
+            .filter(|&ri| Some(ri) != exclude_remapped)
+            .filter_map(|ri| {
+                let start = ri as usize * vs;
+                let vec = self.syn0.get(start..start + vs)?;
+                let word_id = self.vocab.get_word_id(ri)?;
+                Some((word_id, cosine_similarity(query, vec)))
+            })
+            .collect();
+
+        scores.sort_unstable_by(|a, b| {
+            b.1.partial_cmp(&a.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scores.truncate(k);
+        scores
+    }
+
+    /// Word analogy: find words similar to `(vec[a] - vec[b] + vec[c])`.
+    ///
+    /// Words `a`, `b`, and `c` are excluded from the result list.
+    /// Returns top-`k` `(word_id, cosine_similarity)` pairs sorted descending.
+    /// Returns an empty `Vec` if any of the three words is out-of-vocabulary.
+    pub fn analogy(&self, a: u32, b: u32, c: u32, k: usize) -> Vec<(u32, f32)> {
+        if k == 0 {
+            return Vec::new();
+        }
+        let va = match self.get_vector(a) {
+            Some(v) => v.to_vec(),
+            None => return Vec::new(),
+        };
+        let vb = match self.get_vector(b) {
+            Some(v) => v.to_vec(),
+            None => return Vec::new(),
+        };
+        let vc = match self.get_vector(c) {
+            Some(v) => v.to_vec(),
+            None => return Vec::new(),
+        };
+
+        // Compute a - b + c
+        let query: Vec<f32> = va
+            .iter()
+            .zip(vb.iter().zip(vc.iter()))
+            .map(|(&ai, (&bi, &ci))| ai - bi + ci)
+            .collect();
+
+        // Collect remapped IDs to exclude (a, b, c)
+        let mut exclude_remapped: std::collections::HashSet<u32> =
+            std::collections::HashSet::with_capacity(3);
+        for &id in &[a, b, c] {
+            if let Some(ri) = self.vocab.get_remapped_id(id) {
+                exclude_remapped.insert(ri);
+            }
+        }
+
+        let vs = self.config.vector_size;
+        let mut scores: Vec<(u32, f32)> = (0..self.vocab.len() as u32)
+            .filter(|ri| !exclude_remapped.contains(ri))
+            .filter_map(|ri| {
+                let start = ri as usize * vs;
+                let vec = self.syn0.get(start..start + vs)?;
+                let word_id = self.vocab.get_word_id(ri)?;
+                Some((word_id, cosine_similarity(&query, vec)))
+            })
+            .collect();
+
+        scores.sort_unstable_by(|x, y| {
+            y.1.partial_cmp(&x.1)
+                .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        scores.truncate(k);
+        scores
+    }
+
+    // ── Surface-string convenience wrappers ──────────────────────────────────
+
+    /// Look up the original `word_id` for a surface string using the surface map.
+    ///
+    /// Returns `None` if no surface map is attached or the string is not found.
+    fn surface_to_word_id(&self, surface: &str) -> Option<u32> {
+        self.surface_map
+            .as_ref()?
+            .iter()
+            .find_map(|(&id, s)| if s == surface { Some(id) } else { None })
+    }
+
+    /// Cosine similarity between two words identified by their surface string.
+    ///
+    /// Returns `None` if either surface is not in the surface map or vocabulary.
+    pub fn similarity_by_surface(&self, a: &str, b: &str) -> Option<f32> {
+        let a_id = self.surface_to_word_id(a)?;
+        let b_id = self.surface_to_word_id(b)?;
+        self.similarity(a_id, b_id)
+    }
+
+    /// Top-`k` most similar words to `surface`, excluding itself.
+    ///
+    /// Returns an empty `Vec` if the surface is not in the surface map.
+    pub fn most_similar_by_surface(&self, surface: &str, k: usize) -> Vec<(u32, f32)> {
+        match self.surface_to_word_id(surface) {
+            Some(id) => self.most_similar(id, k),
+            None => Vec::new(),
+        }
+    }
+
+    // ── Model reload ─────────────────────────────────────────────────────────
+
+    /// Load a previously saved text-format word2vec model.
+    ///
+    /// Reconstructs `syn0`, vocabulary mappings, and `surface_map` from the file.
+    /// The returned model supports all query methods (`get_vector`, `most_similar`,
+    /// `analogy`, etc.) but cannot resume training (`syn1neg` is not saved in text
+    /// format and is left empty).
+    ///
+    /// # File format (written by `save_text`)
+    /// ```text
+    /// <vocab_size> <vector_size>
+    /// <word_id> <v1> <v2> … <vN>
+    /// …
+    /// ```
+    pub fn load_text<P: AsRef<Path>>(path: P) -> Result<Self> {
+        use std::io::{BufRead, BufReader};
+
+        let file = std::fs::File::open(path.as_ref())
+            .map_err(Word2VecError::Io)?;
+        let reader = BufReader::new(file);
+        let mut lines = reader.lines();
+
+        // ── Parse header: "<vocab_size> <vector_size>" ──────────────────────
+        let header = lines
+            .next()
+            .ok_or_else(|| Word2VecError::InvalidParameter("empty file".into()))??;
+        let mut header_parts = header.split_whitespace();
+        let vocab_size: usize = header_parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                Word2VecError::InvalidParameter("bad header: missing vocab_size".into())
+            })?;
+        let vector_size: usize = header_parts
+            .next()
+            .and_then(|s| s.parse().ok())
+            .ok_or_else(|| {
+                Word2VecError::InvalidParameter("bad header: missing vector_size".into())
+            })?;
+
+        let mut syn0: Vec<f32> = Vec::with_capacity(vocab_size * vector_size);
+        // surface_map: word_id → surface string (here word_id IS the surface token)
+        let mut surface_map: HashMap<u32, String> = HashMap::with_capacity(vocab_size);
+        // vocab entries: (word_id, count) in load order; position == remapped_id
+        let mut vocab_entries: Vec<(u32, u64)> = Vec::with_capacity(vocab_size);
+        let mut word_id_counter: u32 = 0;
+
+        // ── Parse data lines: "<word_id_str> <v1> <v2> … <vN>" ─────────────
+        for raw_line in lines {
+            let line = raw_line?;
+            let line = line.trim();
+            if line.is_empty() {
+                continue;
+            }
+
+            // The first token is the word label (original word_id as a string).
+            // Use splitn(2, ' ') so we can parse the rest lazily.
+            let mut parts = line.splitn(2, ' ');
+            let word_label = parts.next().unwrap_or("").to_string();
+            let vec_str = parts.next().unwrap_or("");
+
+            // Parse the vector
+            let vec: Vec<f32> = vec_str
+                .split_whitespace()
+                .map(|s| {
+                    s.parse::<f32>().map_err(|e| {
+                        Word2VecError::InvalidParameter(format!(
+                            "cannot parse float in row '{word_label}': {e}"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>>>()?;
+
+            if vec.len() != vector_size {
+                return Err(Word2VecError::InvalidParameter(format!(
+                    "vector length mismatch for '{word_label}': expected {vector_size}, got {}",
+                    vec.len()
+                )));
+            }
+
+            syn0.extend_from_slice(&vec);
+
+            // Try to interpret the label as a numeric word_id; fall back to counter.
+            let word_id: u32 = word_label
+                .parse::<u32>()
+                .unwrap_or(word_id_counter);
+
+            // position in vocab_entries == remapped_id
+            let remapped_id = vocab_entries.len() as u32;
+            _ = remapped_id; // used implicitly via push ordering
+            vocab_entries.push((word_id, 1));
+            surface_map.insert(word_id, word_label);
+            word_id_counter += 1;
+        }
+
+        // ── Build vocabulary with identity-like mapping ─────────────────────
+        let vocab = Vocabulary::from_word_id_list(&vocab_entries);
+
+        // ── Assemble config (only vector_size is meaningful for inference) ──
+        let config = TrainingConfig {
+            vector_size,
+            ..Default::default()
+        };
+
+        Ok(Self {
+            config,
+            vocab: Arc::new(vocab),
+            syn0,
+            syn1neg: Vec::new(), // not saved in text format
+            syn_ng: Vec::new(),
+            surface_map: Some(surface_map),
+        })
+    }
 }
 
 /// Builder for Word2Vec model
@@ -490,5 +782,385 @@ impl Word2VecBuilder {
         }
 
         Ok(Word2Vec::new(self.config, vocab))
+    }
+}
+
+// ── Unit tests ────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    fn temp_path(stem: &str, ext: &str) -> std::path::PathBuf {
+        let nanos = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        // Include thread ID to prevent collisions between parallel test threads.
+        let tid = std::thread::current().id();
+        std::env::temp_dir().join(format!("mecrab_model_{stem}_{nanos}_{tid:?}.{ext}"))
+    }
+
+    fn make_corpus(sentences: &[&str]) -> std::path::PathBuf {
+        let path = temp_path("corpus", "txt");
+        let mut f = std::fs::File::create(&path).expect("create corpus");
+        for s in sentences {
+            writeln!(f, "{s}").expect("write");
+        }
+        path
+    }
+
+    fn tiny_model(corpus: &std::path::Path) -> Word2Vec {
+        Word2VecBuilder::new()
+            .vector_size(4)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(2)
+            .threads(1)
+            .build_from_corpus(corpus)
+            .expect("build_from_corpus")
+    }
+
+    fn tiny_sentences() -> Vec<&'static str> {
+        vec![
+            "0 1 2 3 4 5",
+            "1 2 3 4 5 0",
+            "2 3 4 5 0 1",
+            "3 4 5 0 1 2",
+            "4 5 0 1 2 3",
+            "5 0 1 2 3 4",
+            "0 1 2 3 4 5",
+            "1 2 3 4 5 0",
+            "0 2 4 1 3 5",
+            "5 3 1 4 2 0",
+        ]
+    }
+
+    // ── cosine_similarity ─────────────────────────────────────────────────────
+
+    #[test]
+    fn test_cosine_same_vector_is_one() {
+        let v = vec![1.0f32, 2.0, 3.0, 4.0];
+        let sim = cosine_similarity(&v, &v);
+        assert!((sim - 1.0).abs() < 1e-6, "got {sim}");
+    }
+
+    #[test]
+    fn test_cosine_orthogonal_is_zero() {
+        let a = vec![1.0f32, 0.0, 0.0, 0.0];
+        let b = vec![0.0f32, 1.0, 0.0, 0.0];
+        assert!(cosine_similarity(&a, &b).abs() < 1e-6);
+    }
+
+    #[test]
+    fn test_cosine_zero_norm_returns_zero() {
+        let a = vec![0.0f32; 4];
+        let b = vec![1.0f32, 2.0, 3.0, 4.0];
+        assert_eq!(cosine_similarity(&a, &b), 0.0);
+    }
+
+    #[test]
+    fn test_cosine_antiparallel_is_neg_one() {
+        let a = vec![1.0f32, 0.0];
+        let b = vec![-1.0f32, 0.0];
+        assert!((cosine_similarity(&a, &b) + 1.0).abs() < 1e-6);
+    }
+
+    // ── similarity ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_similarity_symmetry() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        for a in 0u32..=3 {
+            for b in (a + 1)..=5 {
+                if let (Some(ab), Some(ba)) = (model.similarity(a, b), model.similarity(b, a)) {
+                    assert!((ab - ba).abs() < 1e-5, "not symmetric ({a},{b}): {ab} vs {ba}");
+                }
+            }
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_similarity_self_is_one() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        for id in 0u32..=5 {
+            if let Some(sim) = model.similarity(id, id) {
+                assert!((sim - 1.0).abs() < 1e-5, "word {id}: got {sim}");
+            }
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_similarity_oov_returns_none() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        assert!(model.similarity(0, 9999).is_none());
+        assert!(model.similarity(9999, 0).is_none());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    // ── get_vector ────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_get_vector_in_vocab() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        let v = model.get_vector(0).expect("word 0 must be in vocab");
+        assert_eq!(v.len(), 4);
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_get_vector_oov_returns_none() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        assert!(model.get_vector(9999).is_none());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    // ── most_similar ──────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_most_similar_excludes_self() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        let results = model.most_similar(0, 3);
+        assert!(!results.iter().any(|&(id, _)| id == 0));
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_most_similar_bounded_by_k() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        for k in [1usize, 3, 5] {
+            assert!(model.most_similar(0, k).len() <= k);
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_most_similar_sorted_descending() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        let results = model.most_similar(0, 5);
+        for pair in results.windows(2) {
+            assert!(pair[0].1 >= pair[1].1);
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_most_similar_oov_returns_empty() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        assert!(model.most_similar(9999, 5).is_empty());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_most_similar_k_zero_returns_empty() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        assert!(model.most_similar(0, 0).is_empty());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_most_similar_by_vec_wrong_dim_returns_empty() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        let bad = vec![1.0f32; 999];
+        assert!(model.most_similar_by_vec(&bad, 3, None).is_empty());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    // ── analogy ───────────────────────────────────────────────────────────────
+
+    #[test]
+    fn test_analogy_returns_finite() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        for &(_, sim) in &model.analogy(0, 1, 2, 3) {
+            assert!(sim.is_finite(), "got {sim}");
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_analogy_excludes_inputs() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        let (a, b, c) = (0u32, 1u32, 2u32);
+        for &(id, _) in &model.analogy(a, b, c, 5) {
+            assert!(id != a && id != b && id != c, "must exclude inputs, got {id}");
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_analogy_oov_returns_empty() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        assert!(model.analogy(9999, 0, 1, 3).is_empty());
+        assert!(model.analogy(0, 9999, 1, 3).is_empty());
+        assert!(model.analogy(0, 1, 9999, 3).is_empty());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_analogy_sorted_descending() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        let results = model.analogy(0, 1, 2, 4);
+        for pair in results.windows(2) {
+            assert!(pair[0].1 >= pair[1].1);
+        }
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    // ── surface wrappers ──────────────────────────────────────────────────────
+
+    #[test]
+    fn test_surface_similarity_no_map_returns_none() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        assert!(model.similarity_by_surface("w0", "w1").is_none());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_surface_similarity_with_map() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = tiny_model(&corpus);
+        model.train_from_file(&corpus).expect("train");
+        let sm: HashMap<u32, String> = (0u32..=5).map(|i| (i, format!("w{i}"))).collect();
+        model.set_surface_map(sm);
+        let sim = model.similarity_by_surface("w0", "w1");
+        assert!(sim.is_some());
+        assert!(sim.unwrap().is_finite());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    #[test]
+    fn test_most_similar_by_surface_unknown_returns_empty() {
+        let corpus = make_corpus(&tiny_sentences());
+        let model = tiny_model(&corpus);
+        assert!(model.most_similar_by_surface("unknown", 3).is_empty());
+        let _ = std::fs::remove_file(&corpus);
+    }
+
+    // ── load_text round-trip ──────────────────────────────────────────────────
+
+    #[test]
+    fn test_load_text_round_trip() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = Word2VecBuilder::new()
+            .vector_size(6)
+            .window_size(2)
+            .negative_samples(2)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(3)
+            .threads(1)
+            .build_from_corpus(&corpus)
+            .expect("build");
+        model.train_from_file(&corpus).expect("train");
+
+        let out = temp_path("rt", "txt");
+        model.save_text(&out).expect("save");
+
+        let loaded = Word2Vec::load_text(&out).expect("load");
+
+        assert_eq!(loaded.config().vector_size, model.config().vector_size);
+        assert_eq!(loaded.vocab().len(), model.vocab().len());
+        assert_eq!(loaded.syn0.len(), model.syn0.len());
+
+        for id in 0u32..=5 {
+            let orig = match model.get_vector(id) {
+                Some(v) => v.to_vec(),
+                None => continue,
+            };
+            let reloaded = loaded.get_vector(id).expect("must be loadable");
+            for (i, (&o, &r)) in orig.iter().zip(reloaded.iter()).enumerate() {
+                assert!((o - r).abs() < 1e-5, "syn0[{id}][{i}]: {o} vs {r}");
+            }
+        }
+
+        let neighbors = loaded.most_similar(0, 3);
+        assert!(!neighbors.is_empty());
+        for &(_, s) in &neighbors {
+            assert!(s.is_finite());
+        }
+
+        let _ = std::fs::remove_file(&corpus);
+        let _ = std::fs::remove_file(&out);
+    }
+
+    #[test]
+    fn test_load_text_empty_file_errors() {
+        let path = temp_path("empty", "txt");
+        std::fs::write(&path, "").expect("write");
+        assert!(Word2Vec::load_text(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_text_bad_header_errors() {
+        let path = temp_path("badheader", "txt");
+        std::fs::write(&path, "NaN NaN\n").expect("write");
+        assert!(Word2Vec::load_text(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_load_text_vector_mismatch_errors() {
+        let path = temp_path("vecmismatch", "txt");
+        // Header says vector_size=4 but row has 2 floats
+        std::fs::write(&path, "1 4\n0 0.1 0.2\n").expect("write");
+        assert!(Word2Vec::load_text(&path).is_err());
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn test_loaded_model_supports_analogy() {
+        let corpus = make_corpus(&tiny_sentences());
+        let mut model = Word2VecBuilder::new()
+            .vector_size(4)
+            .min_count(1)
+            .sample(0.0)
+            .epochs(2)
+            .threads(1)
+            .build_from_corpus(&corpus)
+            .expect("build");
+        model.train_from_file(&corpus).expect("train");
+
+        let path = temp_path("analogy", "txt");
+        model.save_text(&path).expect("save");
+        let loaded = Word2Vec::load_text(&path).expect("load");
+
+        assert!(!loaded.most_similar(0, 2).is_empty());
+        for &(_, s) in &loaded.analogy(0, 1, 2, 2) {
+            assert!(s.is_finite());
+        }
+
+        let _ = std::fs::remove_file(&corpus);
+        let _ = std::fs::remove_file(&path);
     }
 }

@@ -32,9 +32,12 @@ pub use user_dict::{DictFormat, UserDictManager, UserDictStats, UserEntry, Valid
 
 use crate::{Error, Result};
 use memmap2::Mmap;
+use std::collections::HashMap;
 use std::fs::File;
+use std::io::{BufRead, BufReader};
 use std::path::Path;
-use std::sync::Arc;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 
 /// Dictionary file names (MeCab/IPADIC format)
 /// System dictionary file name
@@ -73,6 +76,15 @@ pub struct Dictionary {
     pub semantic_pool: Option<Arc<crate::semantic::pool::SemanticPool>>,
     /// Surface form → URIs mapping (optional)
     pub surface_map: Option<Arc<SurfaceMap>>,
+    /// Trained word-cost overrides: word_id → delta to apply on top of sys_dic wcost.
+    ///
+    /// Protected by `RwLock` for thread-safe updates.  The lock is only
+    /// acquired when `override_count > 0` (fast-path: atomic check first).
+    word_cost_overrides: RwLock<HashMap<u32, i16>>,
+    /// Number of active word-cost overrides. 0 → skip the slow path entirely.
+    ///
+    /// Set with `Ordering::Release` on write; loaded with `Ordering::Acquire` on read.
+    override_count: AtomicUsize,
     /// Memory maps (kept alive to maintain the mapped regions)
     _mmaps: Vec<Arc<Mmap>>,
 }
@@ -137,6 +149,8 @@ impl Dictionary {
             overlay: OverlayDictionary::new(),
             semantic_pool: None,
             surface_map: None,
+            word_cost_overrides: RwLock::new(HashMap::new()),
+            override_count: AtomicUsize::new(0),
             _mmaps: mmaps,
         })
     }
@@ -223,6 +237,8 @@ impl Dictionary {
             overlay: OverlayDictionary::new(),
             semantic_pool: None,
             surface_map: None,
+            word_cost_overrides: RwLock::new(HashMap::new()),
+            override_count: AtomicUsize::new(0),
             _mmaps: Vec::new(),
         })
     }
@@ -270,21 +286,95 @@ impl Dictionary {
     ///
     /// ## Fast path
     ///
-    /// When no words have been added to the overlay (the common case in
-    /// production), this method bypasses all overlay RwLock operations and
-    /// returns the system-dictionary results directly.  The check uses a
-    /// single `AtomicUsize::load(Acquire)` — no mutex or fence beyond that.
+    /// When no words have been added to the overlay **and** no word-cost
+    /// overrides are active (the common case in production), this method
+    /// bypasses all RwLock operations and returns system-dictionary results
+    /// directly.  Both checks use a single `AtomicUsize::load(Acquire)` each
+    /// — no mutex or fence beyond that.
+    ///
+    /// ## Invariant
+    ///
+    /// When `override_count == 0 && overlay.is_empty()`, lookup returns
+    /// **identical** results to the pre-change code path.
     pub fn lookup(&self, key: &str) -> Vec<DictionaryEntry> {
-        // Fast path: skip overlay entirely when it is empty.
-        // `is_empty()` is a lock-free atomic load — negligible overhead.
-        if self.overlay.is_empty() {
+        let has_overrides = self.override_count.load(Ordering::Acquire) > 0;
+
+        // Ultra-fast path: skip both overlay and overrides.
+        if self.overlay.is_empty() && !has_overrides {
             return self.sys_dic.common_prefix_search(key);
         }
 
-        // Slow path: merge overlay results with system-dictionary results.
-        let mut results = self.overlay.lookup(key);
-        results.extend(self.sys_dic.common_prefix_search(key));
+        // Collect base results (overlay + sys_dic)
+        let mut results = if self.overlay.is_empty() {
+            self.sys_dic.common_prefix_search(key)
+        } else {
+            let mut r = self.overlay.lookup(key);
+            r.extend(self.sys_dic.common_prefix_search(key));
+            r
+        };
+
+        // Apply word-cost overrides when active
+        if has_overrides {
+            let overrides = self.word_cost_overrides.read().unwrap_or_else(|e| e.into_inner());
+            for entry in &mut results {
+                if let Some(&delta) = overrides.get(&entry.word_id) {
+                    let updated = entry.wcost as i64 + delta as i64;
+                    entry.wcost = updated.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+                }
+            }
+        }
+
         results
+    }
+
+    /// Set word-cost overrides from trained deltas. Thread-safe.
+    ///
+    /// Each entry in `overrides` is a `word_id → delta_i16` pair.  The delta
+    /// is applied on top of the word's original `wcost` from the system
+    /// dictionary on every subsequent call to [`lookup`](Self::lookup).
+    ///
+    /// Passing an empty map clears all overrides and re-enables the fast path.
+    pub fn set_word_cost_overrides(&self, overrides: HashMap<u32, i16>) {
+        let len = overrides.len();
+        *self.word_cost_overrides.write().unwrap_or_else(|e| e.into_inner()) = overrides;
+        self.override_count.store(len, Ordering::Release);
+    }
+
+    /// Load word-cost overrides from a TSV file (`word_id TAB delta_i16` per line).
+    ///
+    /// Lines beginning with `#` are treated as comments and skipped.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or any line is malformed.
+    pub fn load_word_cost_overrides<P: AsRef<Path>>(&self, path: P) -> Result<()> {
+        let file = File::open(path.as_ref())
+            .map_err(|e| Error::IoError(format!("cannot open {}: {e}", path.as_ref().display())))?;
+        let reader = BufReader::new(file);
+        let mut map: HashMap<u32, i16> = HashMap::new();
+        for (line_no, line) in reader.lines().enumerate() {
+            let line = line.map_err(|e| Error::IoError(format!("{e}")))?;
+            let trimmed = line.trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            let mut parts = trimmed.splitn(2, '\t');
+            let wid_str = parts.next().ok_or_else(|| {
+                Error::IoError(format!("line {}: missing word_id", line_no + 1))
+            })?;
+            let delta_str = parts.next().ok_or_else(|| {
+                Error::IoError(format!("line {}: missing delta", line_no + 1))
+            })?;
+            let word_id: u32 = wid_str.parse().map_err(|e| {
+                Error::IoError(format!("line {}: invalid word_id: {e}", line_no + 1))
+            })?;
+            let delta: i16 = delta_str.parse().map_err(|e| {
+                Error::IoError(format!("line {}: invalid delta: {e}", line_no + 1))
+            })?;
+            map.insert(word_id, delta);
+        }
+        self.set_word_cost_overrides(map);
+        Ok(())
     }
 
     /// Add a word to the overlay dictionary at runtime
@@ -471,6 +561,104 @@ mod tests {
         let removed = overlay.remove_word("ChatGPT");
         assert!(removed, "remove_word should return true");
         assert!(overlay.is_empty(), "overlay must be empty after remove");
+    }
+
+    /// Verify that empty override map + empty overlay produces the identical
+    /// fast-path result as having no overrides at all.
+    ///
+    /// Uses a synthetic in-memory dictionary so no real IPADIC is required.
+    #[test]
+    fn test_empty_override_lookup_identical() {
+        use mecrab_builder::build_synthetic_dictionary;
+        let sd = build_synthetic_dictionary();
+        let dict = Dictionary::from_bytes(&sd.sys_dic, &sd.matrix, &sd.char_def, &sd.unk_def)
+            .expect("build dict");
+
+        // No overrides set — fast path
+        let base = dict.lookup("すもも");
+
+        // Set and then clear overrides — must return to fast path
+        dict.set_word_cost_overrides(HashMap::from([(999_u32, 100_i16)]));
+        dict.set_word_cost_overrides(HashMap::new()); // clear
+
+        let after_clear = dict.lookup("すもも");
+        assert_eq!(
+            base.len(),
+            after_clear.len(),
+            "lookup length must be identical after clearing overrides"
+        );
+        for (a, b) in base.iter().zip(after_clear.iter()) {
+            assert_eq!(a.wcost, b.wcost, "wcost must be unchanged after clearing overrides");
+            assert_eq!(a.word_id, b.word_id);
+        }
+    }
+
+    /// Verify that a word-cost override is correctly applied to matching entries.
+    #[test]
+    fn test_word_cost_override_applied() {
+        use mecrab_builder::build_synthetic_dictionary;
+        let sd = build_synthetic_dictionary();
+        let dict = Dictionary::from_bytes(&sd.sys_dic, &sd.matrix, &sd.char_def, &sd.unk_def)
+            .expect("build dict");
+
+        // Find a word_id that appears in the lookup results for "すもも"
+        let base = dict.lookup("すもも");
+        if base.is_empty() {
+            // If the synthetic dict doesn't have "すもも", skip gracefully
+            return;
+        }
+        let target = base[0].clone();
+        let delta: i16 = -200;
+        let expected_wcost = (target.wcost as i64 + delta as i64)
+            .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+
+        dict.set_word_cost_overrides(HashMap::from([(target.word_id, delta)]));
+        let after = dict.lookup("すもも");
+
+        let overridden = after.iter().find(|e| e.word_id == target.word_id)
+            .expect("overridden word must still appear in results");
+        assert_eq!(
+            overridden.wcost, expected_wcost,
+            "wcost should be adjusted by delta"
+        );
+
+        // Non-targeted word_id should be unaffected
+        for e in &after {
+            if e.word_id != target.word_id {
+                let base_entry = base.iter().find(|b| b.word_id == e.word_id);
+                if let Some(b) = base_entry {
+                    assert_eq!(e.wcost, b.wcost, "unaffected word_id must keep original wcost");
+                }
+            }
+        }
+    }
+
+    /// Verify load_word_cost_overrides parses TSV correctly.
+    #[test]
+    fn test_load_word_cost_overrides_tsv() {
+        use mecrab_builder::build_synthetic_dictionary;
+        use std::env::temp_dir;
+        use std::io::Write;
+
+        let sd = build_synthetic_dictionary();
+        let dict = Dictionary::from_bytes(&sd.sys_dic, &sd.matrix, &sd.char_def, &sd.unk_def)
+            .expect("build dict");
+
+        let path = temp_dir().join("mecrab_test_override.tsv");
+        {
+            let mut f = std::fs::File::create(&path).expect("create tsv");
+            writeln!(f, "# comment line").unwrap();
+            writeln!(f, "42\t-100").unwrap();
+            writeln!(f, "99\t200").unwrap();
+        }
+        dict.load_word_cost_overrides(&path).expect("load_word_cost_overrides");
+        assert_eq!(dict.override_count.load(Ordering::Acquire), 2);
+        {
+            let map = dict.word_cost_overrides.read().unwrap();
+            assert_eq!(map.get(&42).copied(), Some(-100_i16));
+            assert_eq!(map.get(&99).copied(), Some(200_i16));
+        }
+        let _ = std::fs::remove_file(&path);
     }
 }
 

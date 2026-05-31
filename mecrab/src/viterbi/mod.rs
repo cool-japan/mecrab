@@ -333,28 +333,16 @@ impl<'a> ViterbiSolver<'a> {
                     );
                 }
 
-                // Also check earlier positions (longer words may span multiple slots)
-                for check_pos in 1..prev_pos {
-                    if check_pos < table.positions() {
-                        // Only consider entries whose node ends exactly where ours starts
-                        for (prev_idx, cold) in table.cold_at(check_pos).iter().enumerate() {
-                            if cold.node.end == node.start {
-                                let conn_cost = self
-                                    .dictionary
-                                    .connection_cost(cold.node.right_id, node.left_id)
-                                    as i64;
-                                let prev_cost = table.costs_at(check_pos)[prev_idx];
-                                let total_cost = prev_cost + conn_cost + node.wcost as i64;
-
-                                if total_cost < best_cost {
-                                    best_cost = total_cost;
-                                    best_prev = Some(prev_idx as u32);
-                                    best_prev_pos = check_pos as u32;
-                                }
-                            }
-                        }
-                    }
-                }
+                // Invariant: every node with end == node.start is stored at nodes_at[node.start + 1]
+                // (= table position prev_pos). No other slot can contain such a node.
+                // The loop above was dead code — kept only as a safety net while this was unconfirmed.
+                debug_assert!(
+                    (1..prev_pos).all(|cp| {
+                        cp >= table.positions()
+                            || table.cold_at(cp).iter().all(|c| c.node.end != node.start)
+                    }),
+                    "Lattice invariant violated: predecessor found outside prev_pos"
+                );
 
                 if best_cost < i64::MAX {
                     table.push(
@@ -706,23 +694,16 @@ impl<'a> ViterbiSolver<'a> {
                 }
             }
 
-            // Check earlier positions for long-spanning predecessors
-            // (nodes whose end == node.start but stored at a different CSR slot)
-            for check_pos in 1..primary_pred_pos.min(len) {
-                let pred_colds = table.cold_at(check_pos);
-                let pred_costs = table.costs_at(check_pos);
-                for (pred_idx, pred_cold) in pred_colds.iter().enumerate() {
-                    if pred_cold.node.end == node.start {
-                        push_predecessor(
-                            &mut heap,
-                            check_pos,
-                            pred_idx,
-                            pred_cold,
-                            pred_costs[pred_idx],
-                        );
-                    }
-                }
-            }
+            // Invariant: every node with end == node.start is stored at nodes_at[node.start + 1]
+            // (= primary_pred_pos). No earlier slot can contain such a node.
+            // The loop above was dead code — the guard `pred_cold.node.end == node.start`
+            // can never be true for any entry at positions < node.start + 1 by construction.
+            debug_assert!(
+                (1..primary_pred_pos.min(len)).all(|cp| {
+                    table.cold_at(cp).iter().all(|c| c.node.end != node.start)
+                }),
+                "Lattice invariant violated: predecessor found outside primary_pred_pos"
+            );
         }
 
         results

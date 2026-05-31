@@ -93,7 +93,10 @@ pub use rerank::{CostReranker, NullReranker, RerankCandidate, Reranker};
 pub use types::{AnalysisResult, Morpheme, OutputFormat};
 pub use viterbi::analysis::TextScore;
 pub use viterbi::train::{CrfGradient, GoldMorpheme, GoldSegmentation, TrainStepSummary};
-pub use viterbi::train_loop::{DictTrainConfig, DictTrainSummary, EpochStats, TrainingMatrix};
+pub use viterbi::train_loop::{
+    DictTrainConfig, DictTrainSummary, EpochStats, TrainingMatrix,
+    boundary_f1,
+};
 
 #[cfg(feature = "neural")]
 pub use rerank::neural::NeuralReranker;
@@ -713,15 +716,16 @@ impl MeCrab {
         Ok(())
     }
 
-    /// Compute scoring statistics for a text in a single lattice pass.
-    ///
-    /// Runs Viterbi (for total cost and OOV count) and forward-backward (for
-    /// segmentation perplexity and entropy) sharing one lattice build.
-    ///
     /// Train dictionary connection costs on a gold-annotated corpus.
     ///
     /// Returns a [`TrainingMatrix`] containing the updated costs (call
     /// [`TrainingMatrix::write_binary`] to persist) and a [`DictTrainSummary`].
+    ///
+    /// Gold morpheme IDs are resolved from the dictionary before training begins
+    /// so that empirical connection counts use real left/right IDs rather than
+    /// the default (0, 0) placeholders.  Word-cost gradients are also fully
+    /// accumulated into [`TrainingMatrix::word_cost_deltas`] and can be applied
+    /// to the live dictionary via [`MeCrab::set_word_cost_overrides`].
     ///
     /// # Errors
     ///
@@ -734,10 +738,35 @@ impl MeCrab {
         let dict_guard = self.dictionary.load();
         let dict = &***dict_guard;
         let mut matrix = TrainingMatrix::from_connection_matrix(&dict.matrix);
+        // `train_dict` internally resolves IDs and accumulates word-cost deltas.
         let summary = viterbi::train_loop::train_dict(&mut matrix, corpus, dict, config);
         Ok((matrix, summary))
     }
 
+    /// Apply trained word-cost deltas to the live dictionary.
+    ///
+    /// Typically called after [`train_dict`](Self::train_dict) with the deltas
+    /// obtained from [`TrainingMatrix::word_cost_deltas_i16`].
+    pub fn set_word_cost_overrides(&self, overrides: std::collections::HashMap<u32, i16>) {
+        let guard = self.dictionary.load();
+        guard.set_word_cost_overrides(overrides);
+    }
+
+    /// Load trained word-cost overrides from a TSV file (`word_id TAB delta_i16`).
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the file cannot be opened or any line is malformed.
+    pub fn load_word_cost_overrides(&self, path: &std::path::Path) -> Result<()> {
+        let guard = self.dictionary.load();
+        guard.load_word_cost_overrides(path)
+    }
+
+    /// Compute scoring statistics for a text in a single lattice pass.
+    ///
+    /// Runs Viterbi (for total cost and OOV count) and forward-backward (for
+    /// segmentation perplexity and entropy) sharing one lattice build.
+    ///
     /// # Errors
     ///
     /// Returns an error if lattice construction or Viterbi solving fails.

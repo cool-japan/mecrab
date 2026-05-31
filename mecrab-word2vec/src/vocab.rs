@@ -186,4 +186,54 @@ impl Vocabulary {
             .get(word_id as usize)
             .and_then(|&opt| opt)
     }
+
+    /// Build a Vocabulary from a list of `(word_id, count)` pairs that are already
+    /// in their final dense order (index in the list == remapped_id).
+    ///
+    /// Used by `Word2Vec::load_text` to reconstruct the vocabulary without a corpus file.
+    /// `get_remapped_id(word_id) == Some(dense_index)` and
+    /// `get_word_id(dense_index) == Some(word_id)`.
+    pub fn from_word_id_list(entries: &[(u32, u64)]) -> Self {
+        let mut words: HashMap<u32, WordInfo> = HashMap::with_capacity(entries.len());
+        let mut remapped_to_word_id: Vec<u32> = Vec::with_capacity(entries.len());
+        let mut max_word_id: u32 = 0;
+        let total_words: u64 = entries.iter().map(|(_, c)| c).sum();
+
+        for (remapped_id, &(word_id, count)) in entries.iter().enumerate() {
+            words.insert(
+                word_id,
+                WordInfo {
+                    word_id,
+                    remapped_id: remapped_id as u32,
+                    count,
+                    sample_prob: 1.0,
+                },
+            );
+            remapped_to_word_id.push(word_id);
+            if word_id > max_word_id {
+                max_word_id = word_id;
+            }
+        }
+
+        // Build O(1) forward lookup table: word_id → remapped_id
+        let table_len = if entries.is_empty() {
+            0usize
+        } else {
+            max_word_id as usize + 1
+        };
+        let mut word_id_to_remapped: Vec<Option<u32>> = vec![None; table_len];
+        for info in words.values() {
+            word_id_to_remapped[info.word_id as usize] = Some(info.remapped_id);
+        }
+
+        Self {
+            words,
+            remapped_to_word_id,
+            word_id_to_remapped,
+            total_words,
+            max_word_id,
+            min_count: 0,
+            sample: 0.0,
+        }
+    }
 }
