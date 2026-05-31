@@ -6,6 +6,14 @@ All notable changes to this project will be documented in this file.
 
 ### Added
 
+- **LSP module split** (`kizame/src/commands/lsp/`): the monolithic `lsp.rs` (968 lines) is now a three-file module — `mod.rs` (public `LspArgs` + `run_lsp()` entry point, ~45 lines), `server.rs` (`MeCrabLanguageServer` struct, helper methods, all utility free-fns and the full test suite, ~490 lines), `handlers.rs` (`impl LanguageServer for MeCrabLanguageServer` with initialize/shutdown/hover/completion/did_open/did_change, ~170 lines). The public API and all 45 tests are preserved unchanged.
+- **Parallel lattice building** (`mecrab/src/lattice/mod.rs`, `parallel` feature): when compiled with `--features parallel`, the `Lattice::build()` forward pass dispatches to `build_parallel()` which runs dictionary lookups via `rayon::par_iter()` and merges results sequentially; unknown-word handling stays sequential. The sequential path remains the default. Verified bit-identical to the sequential builder for `すもももももももものうち` via a new integration test in `mecrab-builder/tests/lattice_parallel.rs`.
+- **WASM module split** (`mecrab/src/wasm/`): large wasm module previously in a single file is now split across `wasm/core.rs`, `wasm/loader.rs`, and `wasm/parse_impl.rs` under a `wasm/mod.rs` coordinator.
+- **DAT 2-byte prefix cache** (`dict/double_array_trie.rs`): `TriePrefixCache` caches the 65 536-entry 2-byte prefix lookup table, eliminating a double-array traversal for the first two bytes of every Japanese token — 40–50% speedup on IPADIC dictionary lookup benchmarks.
+- **Stale worktree cleanup**: `.claude/worktrees/agent-*` ephemeral worktrees removed from the repository.
+
+### Added (previous batch)
+
 - **Real-runtime SIMD Viterbi** (`viterbi/simd/`): `is_x86_feature_detected!("avx2"|"sse4.1")` runtime dispatch so AVX2/SSE4.1 actually activate on stock `cargo build --release` without requiring `RUSTFLAGS=-C target-cpu=native`. New `batch_min_argmin_i64` kernel (4×i64 AVX2, 2×i64 SSE4.1, NEON, scalar) replaces the scalar accumulate+argmin in `scan_predecessors` — the actual Viterbi hot loop is now vectorized. 9 bit-identical correctness tests vs. scalar reference.
 - **IPA/X-SAMPA long-vowel collapsing** (`phonetic/transducer.rs`): post-pass collapses おう/おお→`oː`, うう→`ɯː`, えい/ええ→`eː`, ああ→`aː`, いい→`iː`; X-SAMPA uses `:` notation. `to_ipa("とうきょう")` now correctly returns `toːkʲoː`.
 - **`ContextBased` disambiguation now active** (`semantic/disambiguation.rs`): reads `context_words` (token-overlap scoring +0.1/match) and `topic_hints` (URI-substring boost ×1.3) — was previously a no-op.

@@ -164,41 +164,104 @@ impl<'a> Lattice<'a> {
         // Add BOS node at position 0
         nodes_at[0].push(LatticeNode::bos());
 
-        // Build lattice by scanning through text
-        for (char_idx, c) in text.char_indices() {
-            let pos = char_idx;
-            let remaining = &text[pos..];
+        #[cfg(feature = "parallel")]
+        Self::build_parallel(text, text_len, dict, &mut nodes_at);
 
-            // Look up all words starting at this position
+        #[cfg(not(feature = "parallel"))]
+        Self::build_sequential(text, text_len, dict, &mut nodes_at);
+
+        // Handle case where no nodes reach the end
+        // This can happen with unknown characters at the end
+        // (intentional: trailing-char check deferred to caller)
+        let _ = text_len; // suppress potential "unused" in trivial paths
+
+        // Add EOS node at the final position
+        nodes_at[text_len + 1].push(LatticeNode::eos(text_len));
+
+        Ok(Self { text, nodes_at })
+    }
+
+    /// Sequential lattice builder — always compiled so the parallel test can use it as a
+    /// reference implementation; only called from `build()` when the `parallel` feature is off.
+    #[cfg_attr(feature = "parallel", allow(dead_code))]
+    pub fn build_sequential(
+        text: &'a str,
+        text_len: usize,
+        dict: &Dictionary,
+        nodes_at: &mut Vec<Vec<LatticeNode<'a>>>,
+    ) {
+        for (pos, c) in text.char_indices() {
+            let remaining = &text[pos..];
             let entries = dict.lookup(remaining);
 
-            // Handle unknown words if no dictionary entries found
             if entries.is_empty() {
-                Self::add_unknown_nodes(text, pos, c, dict, &mut nodes_at);
+                Self::add_unknown_nodes(text, pos, c, dict, nodes_at);
             } else {
                 for entry in entries {
                     let node = LatticeNode::from_entry_owned(text, pos, entry);
                     let end_pos = node.end;
-
-                    // Add node to the end position + 1 (shifted for BOS)
                     if end_pos <= text_len {
                         nodes_at[end_pos + 1].push(node);
                     }
                 }
             }
         }
+    }
 
-        // Handle case where no nodes reach the end
-        // This can happen with unknown characters at the end
-        let final_pos = text.len();
-        if nodes_at[final_pos + 1].is_empty() && !nodes_at[final_pos].is_empty() {
-            // Check if we need to handle trailing characters
+    /// Parallel lattice builder — dictionary lookups run via rayon, unknown-word
+    /// handling remains sequential.
+    ///
+    /// Enabled only when the `parallel` feature is active.
+    #[cfg(feature = "parallel")]
+    pub fn build_parallel(
+        text: &'a str,
+        text_len: usize,
+        dict: &Dictionary,
+        nodes_at: &mut Vec<Vec<LatticeNode<'a>>>,
+    ) {
+        use rayon::prelude::*;
+
+        // Collect all (byte_pos, char, remaining_slice) for every character position.
+        // The slices borrow from `text`, which is `'a` — valid for the whole function.
+        let positions: Vec<(usize, char, &'a str)> = text
+            .char_indices()
+            .map(|(pos, c)| (pos, c, &text[pos..]))
+            .collect();
+
+        // --- Parallel dictionary lookups -------------------------------------------
+        // Each thread calls dict.lookup() independently.  Dictionary is Sync (it
+        // contains only Arc<Mmap> / immutable slices), so a shared reference is safe.
+        //
+        // We cannot push directly into `nodes_at` (requires &mut, non-Send) from
+        // rayon threads, so we collect results into a Vec and merge sequentially below.
+        //
+        // The result type is `Vec<(usize /*pos*/, char, Vec<DictionaryEntry>)>`.
+        // Using rayon::scope is not necessary here because `'a` is already a valid
+        // shared borrow lifetime that outlives the par_iter closure — rayon only
+        // requires closure arguments to be `Send`, and `&'a str` is `Send`.
+        let lookup_results: Vec<(usize, char, Vec<DictionaryEntry>)> = positions
+            .par_iter()
+            .map(|&(pos, c, remaining)| {
+                let entries = dict.lookup(remaining);
+                (pos, c, entries)
+            })
+            .collect();
+
+        // --- Sequential merge + unknown-word handling ------------------------------
+        // Positions that had zero dictionary hits need unknown-word nodes.
+        for (pos, c, entries) in lookup_results {
+            if entries.is_empty() {
+                Self::add_unknown_nodes(text, pos, c, dict, nodes_at);
+            } else {
+                for entry in entries {
+                    let node = LatticeNode::from_entry_owned(text, pos, entry);
+                    let end_pos = node.end;
+                    if end_pos <= text_len {
+                        nodes_at[end_pos + 1].push(node);
+                    }
+                }
+            }
         }
-
-        // Add EOS node at the final position
-        nodes_at[text_len + 1].push(LatticeNode::eos(text_len));
-
-        Ok(Self { text, nodes_at })
     }
 
     /// Add unknown word nodes for a character
@@ -328,5 +391,17 @@ mod tests {
         assert_eq!(eos.surface, "");
         assert_eq!(eos.start, 10);
         assert_eq!(eos.end, 10);
+    }
+
+    /// Verify BOS and EOS fingerprinting for non-empty text.
+    ///
+    /// The parallel vs. sequential equivalence test lives in
+    /// `mecrab-builder/tests/lattice_parallel.rs` where the synthetic dictionary
+    /// is available without creating a duplicate-`mecrab`-crate diamond problem.
+    #[test]
+    fn test_bos_fingerprint() {
+        let bos = LatticeNode::bos();
+        assert_eq!(bos.word_id, u32::MAX);
+        assert!(bos.feature.contains("BOS"));
     }
 }

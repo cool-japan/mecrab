@@ -1,44 +1,22 @@
-//! LSP command - Language Server Protocol server for MeCrab
+//! MeCrabLanguageServer state struct and supporting helpers.
 //!
 //! Copyright 2026 COOLJAPAN OU (Team KitaSan)
-//!
-//! Provides IDE integration via the Language Server Protocol:
-//! - Hover: show morpheme analysis for word under cursor
-//! - Completion: complete Japanese words
-//! - Diagnostics: highlight unknown words
 
-use clap::Args;
 use std::path::PathBuf;
 use std::sync::Arc;
 
 use dashmap::DashMap;
 use mecrab::MeCrab;
 use tokio::sync::RwLock;
-use tower_lsp::jsonrpc::Result as LspResult;
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionItemKind, CompletionOptions, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticOptions, DiagnosticServerCapabilities, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, Hover, HoverContents, HoverParams,
-    HoverProviderCapability, InitializeParams, InitializeResult, InitializedParams, MarkupContent,
-    MarkupKind, MessageType, Position, Range, ServerCapabilities, TextDocumentSyncCapability,
-    TextDocumentSyncKind, Url, WorkDoneProgressOptions,
-};
-use tower_lsp::{Client, LanguageServer, LspService, Server};
-
-/// Arguments for the LSP server subcommand
-#[derive(Args)]
-pub struct LspArgs {
-    /// Path to MeCab dictionary directory (e.g. /usr/local/lib/mecab/dic/ipadic-utf8)
-    #[arg(long, help = "Path to MeCab dictionary directory")]
-    pub dict: Option<PathBuf>,
-}
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range, Url};
+use tower_lsp::Client;
 
 /// MeCrab Language Server state
-struct MeCrabLanguageServer {
-    client: Client,
-    mecrab: Arc<RwLock<Option<MeCrab>>>,
-    documents: Arc<DashMap<Url, String>>,
-    dict_path: Arc<RwLock<Option<PathBuf>>>,
+pub struct MeCrabLanguageServer {
+    pub(super) client: Client,
+    pub(super) mecrab: Arc<RwLock<Option<MeCrab>>>,
+    pub(super) documents: Arc<DashMap<Url, String>>,
+    pub(super) dict_path: Arc<RwLock<Option<PathBuf>>>,
 }
 
 impl MeCrabLanguageServer {
@@ -46,7 +24,7 @@ impl MeCrabLanguageServer {
     ///
     /// Optionally pre-loads the dictionary from `dict_path` if provided.
     /// During `initialize`, standard paths are also probed if no dict was found.
-    fn new(client: Client, dict_path: Option<PathBuf>) -> Self {
+    pub fn new(client: Client, dict_path: Option<PathBuf>) -> Self {
         Self {
             client,
             mecrab: Arc::new(RwLock::new(None)),
@@ -59,7 +37,7 @@ impl MeCrabLanguageServer {
     ///
     /// Called during `initialize`. Failures are logged as warnings; the server
     /// remains functional (but without analysis) if no dictionary is found.
-    async fn try_load_dictionary(&self) {
+    pub(super) async fn try_load_dictionary(&self) {
         let candidate = {
             let guard = self.dict_path.read().await;
             guard.clone()
@@ -112,7 +90,7 @@ impl MeCrabLanguageServer {
     }
 
     /// Well-known locations where MeCab dictionaries are installed on various platforms.
-    fn standard_dict_paths() -> Vec<PathBuf> {
+    pub fn standard_dict_paths() -> Vec<PathBuf> {
         let mut paths = Vec::new();
 
         // User home-relative paths
@@ -142,14 +120,14 @@ impl MeCrabLanguageServer {
     ///
     /// Returns `(word, char_start, char_end)` where the char offsets are
     /// within the line on which the position falls.
-    fn word_at_position(text: &str, position: Position) -> Option<(String, u32, u32)> {
+    pub(super) fn word_at_position(text: &str, position: Position) -> Option<(String, u32, u32)> {
         let line = text.lines().nth(position.line as usize)?;
         extract_word_at_column(line, position.character as usize)
             .map(|(word, start, end)| (word.to_string(), start as u32, end as u32))
     }
 
     /// Run diagnostics on a document and publish them to the client.
-    async fn run_diagnostics(&self, uri: Url, text: &str) {
+    pub(super) async fn run_diagnostics(&self, uri: Url, text: &str) {
         let guard = self.mecrab.read().await;
         let instance = match guard.as_ref() {
             Some(m) => m,
@@ -256,7 +234,7 @@ pub(crate) fn extract_word_at_column(line: &str, col: usize) -> Option<(&str, us
 ///
 /// IPADIC marks unknown words as `*,*,*,*,*,*,*,*,*` or with POS "未知語".
 /// We also treat morphemes whose feature string starts with "未知語" as unknown.
-fn build_diagnostics(text: &str, result: &mecrab::AnalysisResult) -> Vec<Diagnostic> {
+pub(super) fn build_diagnostics(text: &str, result: &mecrab::AnalysisResult) -> Vec<Diagnostic> {
     let mut diagnostics = Vec::new();
 
     // Build a character-offset → (line, col) index for fast lookup.
@@ -321,7 +299,7 @@ fn build_diagnostics(text: &str, result: &mecrab::AnalysisResult) -> Vec<Diagnos
 }
 
 /// Return `true` if `morpheme` represents an unknown word.
-fn is_unknown_morpheme(morpheme: &mecrab::Morpheme) -> bool {
+pub(super) fn is_unknown_morpheme(morpheme: &mecrab::Morpheme) -> bool {
     // IPADIC: feature starts with "未知語" for truly unknown tokens
     if morpheme.feature.starts_with("未知語") {
         return true;
@@ -337,7 +315,7 @@ fn is_unknown_morpheme(morpheme: &mecrab::Morpheme) -> bool {
 }
 
 /// Parse the feature string into (pos, sub_pos, base_form, reading).
-fn parse_ipadic_features(feature: &str) -> (String, String, String, String) {
+pub(super) fn parse_ipadic_features(feature: &str) -> (String, String, String, String) {
     let fields: Vec<&str> = feature.split(',').collect();
     let pos = fields.first().copied().unwrap_or("*").to_string();
     let sub_pos = fields.get(1).copied().unwrap_or("*").to_string();
@@ -346,183 +324,9 @@ fn parse_ipadic_features(feature: &str) -> (String, String, String, String) {
     (pos, sub_pos, base_form, reading)
 }
 
-#[tower_lsp::async_trait]
-impl LanguageServer for MeCrabLanguageServer {
-    async fn initialize(&self, _params: InitializeParams) -> LspResult<InitializeResult> {
-        self.try_load_dictionary().await;
-
-        Ok(InitializeResult {
-            capabilities: ServerCapabilities {
-                text_document_sync: Some(TextDocumentSyncCapability::Kind(
-                    TextDocumentSyncKind::FULL,
-                )),
-                hover_provider: Some(HoverProviderCapability::Simple(true)),
-                completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec!["@".to_string()]),
-                    resolve_provider: Some(false),
-                    work_done_progress_options: WorkDoneProgressOptions {
-                        work_done_progress: Some(false),
-                    },
-                    ..Default::default()
-                }),
-                diagnostic_provider: Some(DiagnosticServerCapabilities::Options(
-                    DiagnosticOptions {
-                        identifier: Some("mecrab".to_string()),
-                        inter_file_dependencies: false,
-                        workspace_diagnostics: false,
-                        work_done_progress_options: WorkDoneProgressOptions {
-                            work_done_progress: Some(false),
-                        },
-                    },
-                )),
-                ..Default::default()
-            },
-            server_info: Some(tower_lsp::lsp_types::ServerInfo {
-                name: "mecrab-lsp".to_string(),
-                version: Some(env!("CARGO_PKG_VERSION").to_string()),
-            }),
-        })
-    }
-
-    async fn initialized(&self, _params: InitializedParams) {
-        self.client
-            .log_message(MessageType::INFO, "MeCrab LSP server initialized.")
-            .await;
-    }
-
-    async fn shutdown(&self) -> LspResult<()> {
-        Ok(())
-    }
-
-    async fn did_open(&self, params: DidOpenTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-        let text = params.text_document.text.clone();
-        self.documents.insert(uri.clone(), text.clone());
-        self.run_diagnostics(uri, &text).await;
-    }
-
-    async fn did_change(&self, params: DidChangeTextDocumentParams) {
-        let uri = params.text_document.uri.clone();
-        // We requested FULL sync, so exactly one change event with the full text.
-        if let Some(change) = params.content_changes.into_iter().last() {
-            let text = change.text;
-            self.documents.insert(uri.clone(), text.clone());
-            self.run_diagnostics(uri, &text).await;
-        }
-    }
-
-    async fn hover(&self, params: HoverParams) -> LspResult<Option<Hover>> {
-        let uri = &params.text_document_position_params.text_document.uri;
-        let position = params.text_document_position_params.position;
-
-        // Retrieve document text
-        let text = match self.documents.get(uri) {
-            Some(entry) => entry.value().clone(),
-            None => return Ok(None),
-        };
-
-        // Extract the word under the cursor
-        let (word, _col_start, _col_end) = match Self::word_at_position(&text, position) {
-            Some(w) => w,
-            None => return Ok(None),
-        };
-
-        // Analyze the extracted word
-        let guard = self.mecrab.read().await;
-        let instance = match guard.as_ref() {
-            Some(m) => m,
-            None => return Ok(None),
-        };
-
-        let result = match instance.parse(&word) {
-            Ok(r) => r,
-            Err(_) => return Ok(None),
-        };
-
-        if result.morphemes.is_empty() {
-            return Ok(None);
-        }
-
-        // Build a Markdown hover card showing each morpheme
-        let mut md = String::from("**MeCrab Analysis**\n\n");
-        md.push_str("| Surface | POS | Sub-POS | Base Form | Reading |\n");
-        md.push_str("|---------|-----|---------|-----------|---------|\n");
-
-        for morpheme in &result.morphemes {
-            let (pos, sub_pos, base_form, reading) = parse_ipadic_features(&morpheme.feature);
-            md.push_str(&format!(
-                "| `{}` | {} | {} | {} | {} |\n",
-                morpheme.surface, pos, sub_pos, base_form, reading
-            ));
-        }
-
-        Ok(Some(Hover {
-            contents: HoverContents::Markup(MarkupContent {
-                kind: MarkupKind::Markdown,
-                value: md,
-            }),
-            range: None,
-        }))
-    }
-
-    async fn completion(&self, params: CompletionParams) -> LspResult<Option<CompletionResponse>> {
-        let uri = &params.text_document_position.text_document.uri;
-        let position = params.text_document_position.position;
-
-        let text = match self.documents.get(uri) {
-            Some(entry) => entry.value().clone(),
-            None => return Ok(None),
-        };
-
-        let guard = self.mecrab.read().await;
-        let instance = match guard.as_ref() {
-            Some(m) => m,
-            None => return Ok(Some(CompletionResponse::Array(vec![]))),
-        };
-
-        // Extract the prefix typed so far on the current line (up to cursor)
-        let prefix = extract_prefix_at(&text, position);
-        if prefix.is_empty() {
-            return Ok(Some(CompletionResponse::Array(vec![])));
-        }
-
-        // Analyse the prefix to get completions from its constituent morphemes
-        let result = match instance.parse(&prefix) {
-            Ok(r) => r,
-            Err(_) => return Ok(Some(CompletionResponse::Array(vec![]))),
-        };
-
-        let items: Vec<CompletionItem> = result
-            .morphemes
-            .iter()
-            .filter(|m| !m.surface.trim().is_empty())
-            .map(|morpheme| {
-                let (pos, _sub, base_form, reading) = parse_ipadic_features(&morpheme.feature);
-                let label = if base_form != "*" && base_form != morpheme.surface {
-                    base_form.clone()
-                } else {
-                    morpheme.surface.clone()
-                };
-                let detail = if reading != "*" {
-                    format!("{pos} [{reading}]")
-                } else {
-                    pos.clone()
-                };
-                CompletionItem {
-                    label,
-                    kind: Some(pos_to_completion_kind(&pos)),
-                    detail: Some(detail),
-                    ..Default::default()
-                }
-            })
-            .collect();
-
-        Ok(Some(CompletionResponse::Array(items)))
-    }
-}
-
 /// Map a MeCab POS string to an LSP `CompletionItemKind`.
-fn pos_to_completion_kind(pos: &str) -> CompletionItemKind {
+pub(super) fn pos_to_completion_kind(pos: &str) -> tower_lsp::lsp_types::CompletionItemKind {
+    use tower_lsp::lsp_types::CompletionItemKind;
     if pos.starts_with("名詞") {
         CompletionItemKind::TEXT
     } else if pos.starts_with("動詞") {
@@ -537,7 +341,7 @@ fn pos_to_completion_kind(pos: &str) -> CompletionItemKind {
 }
 
 /// Extract the text on `line` from the beginning of the line up to `position.character`.
-fn extract_prefix_at(text: &str, position: Position) -> String {
+pub(super) fn extract_prefix_at(text: &str, position: Position) -> String {
     let line = match text.lines().nth(position.line as usize) {
         Some(l) => l,
         None => return String::new(),
@@ -904,6 +708,7 @@ mod tests {
 
     #[test]
     fn test_pos_to_completion_kind_noun() {
+        use tower_lsp::lsp_types::CompletionItemKind;
         assert_eq!(pos_to_completion_kind("名詞"), CompletionItemKind::TEXT);
         assert_eq!(
             pos_to_completion_kind("名詞,固有名詞"),
@@ -913,6 +718,7 @@ mod tests {
 
     #[test]
     fn test_pos_to_completion_kind_verb() {
+        use tower_lsp::lsp_types::CompletionItemKind;
         assert_eq!(pos_to_completion_kind("動詞"), CompletionItemKind::FUNCTION);
         assert_eq!(
             pos_to_completion_kind("動詞,自立"),
@@ -922,6 +728,7 @@ mod tests {
 
     #[test]
     fn test_pos_to_completion_kind_adjective() {
+        use tower_lsp::lsp_types::CompletionItemKind;
         assert_eq!(
             pos_to_completion_kind("形容詞"),
             CompletionItemKind::KEYWORD
@@ -934,6 +741,7 @@ mod tests {
 
     #[test]
     fn test_pos_to_completion_kind_particle() {
+        use tower_lsp::lsp_types::CompletionItemKind;
         assert_eq!(pos_to_completion_kind("助詞"), CompletionItemKind::OPERATOR);
         assert_eq!(
             pos_to_completion_kind("助動詞"),
@@ -943,26 +751,8 @@ mod tests {
 
     #[test]
     fn test_pos_to_completion_kind_fallback() {
+        use tower_lsp::lsp_types::CompletionItemKind;
         assert_eq!(pos_to_completion_kind("*"), CompletionItemKind::VALUE);
         assert_eq!(pos_to_completion_kind("感動詞"), CompletionItemKind::VALUE);
     }
-}
-
-// ─────────────────────────────────────────────────────────────────────────────
-
-/// Entry point: start the MeCrab LSP server over stdin/stdout.
-///
-/// # Errors
-///
-/// Returns an error if the Tokio runtime cannot be created.
-pub fn run_lsp(args: LspArgs) -> Result<(), Box<dyn std::error::Error>> {
-    let runtime = tokio::runtime::Runtime::new()?;
-    runtime.block_on(async {
-        let stdin = tokio::io::stdin();
-        let stdout = tokio::io::stdout();
-        let (service, socket) =
-            LspService::new(|client| MeCrabLanguageServer::new(client, args.dict));
-        Server::new(stdin, stdout, socket).serve(service).await;
-        Ok(())
-    })
 }

@@ -236,7 +236,7 @@ impl SysDic {
     /// Returns an error if the file is corrupted or has invalid format.
     pub fn from_mmap(mmap: Arc<Mmap>) -> Result<Self> {
         let (
-            trie,
+            mut trie,
             tokens_ptr,
             tokens_count,
             features_ptr,
@@ -248,6 +248,9 @@ impl SysDic {
             right_size,
             charset,
         ) = Self::parse_bytes(mmap.as_ref())?;
+        // Build the two-byte prefix cache once here so every subsequent
+        // `common_prefix_search` call benefits from the acceleration.
+        trie.build_prefix_cache();
         Ok(Self {
             _backing: DataBacking::Mmap(mmap),
             trie,
@@ -274,7 +277,7 @@ impl SysDic {
     /// Returns an error if the data is corrupted or has an invalid format.
     pub fn from_bytes_owned(data: Arc<Vec<u8>>) -> Result<Self> {
         let (
-            trie,
+            mut trie,
             tokens_ptr,
             tokens_count,
             features_ptr,
@@ -286,6 +289,9 @@ impl SysDic {
             right_size,
             charset,
         ) = Self::parse_bytes(data.as_ref())?;
+        // Build the two-byte prefix cache once here so every subsequent
+        // `common_prefix_search` call benefits from the acceleration.
+        trie.build_prefix_cache();
         Ok(Self {
             _backing: DataBacking::Owned(data),
             trie,

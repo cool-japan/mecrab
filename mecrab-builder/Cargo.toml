@@ -13,7 +13,9 @@ categories = ["command-line-utilities", "text-processing"]
 
 [dependencies]
 # Core library (for Token, SemanticEntry definitions)
-mecrab = { path = "../mecrab" }
+# The `parallel` feature is activated here so that the lattice parallel-vs-sequential
+# integration test in tests/lattice_parallel.rs can exercise both code paths.
+mecrab = { path = "../mecrab", features = ["parallel"] }
 
 # Binary serialization (LE integers for sys.dic, matrix.bin, char.bin output)
 byteorder.workspace = true
