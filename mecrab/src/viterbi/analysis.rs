@@ -428,7 +428,85 @@ pub struct LatticeProbTable {
     pub log_z: f64,
 }
 
+/// Summary scores for a parsed text: statistical certainty and segmentation cost.
+#[derive(Debug, Clone)]
+pub struct TextScore {
+    /// Viterbi cost (lower = better fit to dictionary costs)
+    pub viterbi_cost: i64,
+    /// Segmentation perplexity from forward-backward (lower = more certain)
+    pub perplexity: f64,
+    /// Segmentation entropy in nats (lower = less ambiguous)
+    pub entropy: f64,
+    /// Morpheme count (from Viterbi path)
+    pub morpheme_count: usize,
+    /// Count of out-of-vocabulary (unknown word) tokens
+    pub oov_count: usize,
+}
+
 impl LatticeProbTable {
+    /// Partition function perplexity from forward-backward marginals.
+    ///
+    /// Perplexity of the model = exp(-mean_log_marginal_per_position).
+    /// For each non-trivial position (has at least one node with prob > 0),
+    /// takes the marginal of the highest-probability node p_max and accumulates
+    /// -ln(p_max). The mean over all live positions is then exponentiated.
+    ///
+    /// Returns 1.0 for an empty table (degenerate case: perfect certainty).
+    pub fn perplexity(&self) -> f64 {
+        let live_positions: Vec<&Vec<NodeMarginal>> = self
+            .by_position
+            .iter()
+            .filter(|nodes| nodes.iter().any(|n| n.prob > 0.0))
+            .collect();
+
+        if live_positions.is_empty() {
+            return 1.0;
+        }
+
+        let total_neg_log: f64 = live_positions
+            .iter()
+            .map(|nodes| {
+                // p_max at this position
+                let p_max = nodes
+                    .iter()
+                    .map(|n| n.prob)
+                    .fold(0.0_f64, f64::max);
+                if p_max <= 0.0 {
+                    0.0
+                } else {
+                    -p_max.ln()
+                }
+            })
+            .sum();
+
+        let mean = total_neg_log / live_positions.len() as f64;
+        mean.exp()
+    }
+
+    /// Segmentation entropy in nats: H = -sum_{position,node} marginal * ln(marginal).
+    ///
+    /// Measures uncertainty in the segmentation. Zero for a unique (unambiguous) sentence.
+    /// Only counts positions that are "live" (have at least one prob > 0).
+    /// By convention, 0 * ln(0) = 0 (skipped).
+    pub fn segmentation_entropy(&self) -> f64 {
+        self.by_position
+            .iter()
+            .filter(|nodes| nodes.iter().any(|n| n.prob > 0.0))
+            .flat_map(|nodes| nodes.iter())
+            .filter(|n| n.prob > 0.0)
+            .map(|n| -n.prob * n.prob.ln())
+            .sum()
+    }
+
+    /// Estimate morpheme count as number of positions where at least one node
+    /// has `prob >= 0.5` (heuristic for on-path membership).
+    pub fn morpheme_count_estimate(&self) -> usize {
+        self.by_position
+            .iter()
+            .filter(|nodes| nodes.iter().any(|n| n.prob >= 0.5))
+            .count()
+    }
+
     /// Return all `NodeMarginal`s for the highest-probability nodes
     /// at each position (i.e., for each lattice position, the node with the
     /// highest marginal probability).
@@ -651,5 +729,111 @@ mod tests {
 
         assert_eq!(report.morpheme_distribution[2], 2);
         assert_eq!(report.morpheme_distribution[3], 1);
+    }
+
+    #[test]
+    fn test_perplexity_empty_table() {
+        let table = LatticeProbTable::default();
+        assert!((table.perplexity() - 1.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_entropy_empty_table() {
+        let table = LatticeProbTable::default();
+        assert!(table.segmentation_entropy().abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_perplexity_certain_segmentation() {
+        // Single position with prob = 1.0 → -ln(1.0) = 0.0 → exp(0.0) = 1.0
+        let mut table = LatticeProbTable::default();
+        table.by_position.push(vec![NodeMarginal {
+            surface: "テスト".to_string(),
+            feature: String::new(),
+            start: 0,
+            end: 9,
+            log_prob: 0.0,
+            prob: 1.0,
+        }]);
+        assert!((table.perplexity() - 1.0).abs() < 0.01);
+    }
+
+    #[test]
+    fn test_entropy_certain_segmentation() {
+        // prob = 1.0 → -1.0 * ln(1.0) = 0.0
+        let mut table = LatticeProbTable::default();
+        table.by_position.push(vec![NodeMarginal {
+            surface: "確実".to_string(),
+            feature: String::new(),
+            start: 0,
+            end: 6,
+            log_prob: 0.0,
+            prob: 1.0,
+        }]);
+        assert!(table.segmentation_entropy().abs() < 1e-9);
+    }
+
+    #[test]
+    fn test_perplexity_uniform_two_choices() {
+        // Two nodes each with prob = 0.5 → p_max = 0.5 → -ln(0.5) ≈ 0.693 → exp ≈ 2.0
+        let mut table = LatticeProbTable::default();
+        table.by_position.push(vec![
+            NodeMarginal {
+                surface: "東京".to_string(),
+                feature: String::new(),
+                start: 0,
+                end: 6,
+                log_prob: -0.693_f64,
+                prob: 0.5,
+            },
+            NodeMarginal {
+                surface: "東".to_string(),
+                feature: String::new(),
+                start: 0,
+                end: 3,
+                log_prob: -0.693_f64,
+                prob: 0.5,
+            },
+        ]);
+        let perp = table.perplexity();
+        assert!((perp - 2.0).abs() < 0.01, "expected ~2.0, got {perp}");
+    }
+
+    #[test]
+    fn test_morpheme_count_estimate() {
+        let mut table = LatticeProbTable::default();
+        // Position 0: one node with prob >= 0.5 → counts
+        table.by_position.push(vec![NodeMarginal {
+            surface: "東京".to_string(),
+            feature: String::new(),
+            start: 0,
+            end: 6,
+            log_prob: -0.1_f64,
+            prob: 0.9,
+        }]);
+        // Position 1: all below 0.5 → does not count
+        table.by_position.push(vec![NodeMarginal {
+            surface: "は".to_string(),
+            feature: String::new(),
+            start: 6,
+            end: 9,
+            log_prob: -1.5_f64,
+            prob: 0.22,
+        }]);
+        assert_eq!(table.morpheme_count_estimate(), 1);
+    }
+
+    #[test]
+    fn test_text_score_fields() {
+        let score = TextScore {
+            viterbi_cost: 1234,
+            perplexity: 1.5,
+            entropy: 0.7,
+            morpheme_count: 3,
+            oov_count: 0,
+        };
+        assert_eq!(score.viterbi_cost, 1234);
+        assert!((score.perplexity - 1.5).abs() < 1e-9);
+        assert_eq!(score.oov_count, 0);
     }
 }

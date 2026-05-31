@@ -91,6 +91,8 @@ pub use error::{Error, Result};
 pub use lattice::ParseConstraints;
 pub use rerank::{CostReranker, NullReranker, RerankCandidate, Reranker};
 pub use types::{AnalysisResult, Morpheme, OutputFormat};
+pub use viterbi::analysis::TextScore;
+pub use viterbi::train::{CrfGradient, GoldMorpheme, GoldSegmentation, TrainStepSummary};
 
 #[cfg(feature = "neural")]
 pub use rerank::neural::NeuralReranker;
@@ -708,6 +710,42 @@ impl MeCrab {
         let new_dict = Dictionary::load(path)?;
         self.hot_swap(new_dict);
         Ok(())
+    }
+
+    /// Compute scoring statistics for a text in a single lattice pass.
+    ///
+    /// Runs Viterbi (for total cost and OOV count) and forward-backward (for
+    /// segmentation perplexity and entropy) sharing one lattice build.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if lattice construction or Viterbi solving fails.
+    pub fn score(&self, text: &str) -> Result<crate::viterbi::analysis::TextScore> {
+        use crate::viterbi::analysis::TextScore;
+
+        let dict_guard = self.dictionary.load();
+        let dict = &***dict_guard;
+        let lattice = Lattice::build(text, dict)?;
+        let solver = ViterbiSolver::new(dict);
+
+        let paths = solver.solve_nbest(&lattice, 1)?;
+        let (path, viterbi_cost) = paths
+            .into_iter()
+            .next()
+            .ok_or_else(|| Error::ViterbiError("no Viterbi path for scoring".to_string()))?;
+
+        let morpheme_count = path.len();
+        let oov_count = path.iter().filter(|n| n.word_id == u32::MAX).count();
+
+        let probs = solver.forward_backward(&lattice);
+
+        Ok(TextScore {
+            viterbi_cost,
+            perplexity: probs.perplexity(),
+            entropy: probs.segmentation_entropy(),
+            morpheme_count,
+            oov_count,
+        })
     }
 }
 

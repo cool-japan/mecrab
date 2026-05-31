@@ -346,8 +346,23 @@
 - [x] Empty-overlay fast path: `Dictionary::lookup()` uses lock-free `AtomicUsize` counter; skips RwLock guards entirely when overlay is empty (common case).
 - [x] Unknown-word category template cache: all 11 `CharCategory` entry templates precomputed at dict load; `generate_entries()` is now O(1) clone + length write instead of per-call trie search.
 
+## v0.3.4 Additions (2026-05-31)
+
+### Completed
+
+#### Performance
+- [x] **ViterbiTable CSR layout** (`viterbi/mod.rs`): `Vec<Vec<_>>` → single flat CSR arrays with `offsets: Vec<u32>`; `costs_at(pos)` / `right_ids_at(pos)` / `cold_at(pos)` return zero-indirection contiguous slices; open-ended current-position semantics preserve EOS predecessor discovery.
+- [x] **word2vec Vose's alias method** (`mecrab-word2vec/src/skipgram.rs`): replaced 100 M-entry / 400 MB CDF table with 3-array O(N) alias table (~1.6 MB for 100 k vocab); O(1) sampling, distribution-identical.
+- [x] **word2vec `min_count` / `subsample_threshold`** (`model.rs`): vocabulary frequency filtering and frequent-word subsampling; `kizame vectors train --min-count --subsample` CLI flags.
+
+#### Correctness
+- [x] **Exact N-best (`nbest_exact`)** (`viterbi/mod.rs`): replaced broken single-back-pointer approximate N-best with a heap-based search exploring ALL table predecessors per node; returns true k shortest paths in non-decreasing cost order.
+
+#### New API
+- [x] **Sentence scoring** (`TextScore`, `MeCrab::score()`, `kizame score`): single-pass Viterbi + forward-backward yielding Viterbi cost, segmentation perplexity, entropy, morpheme count, OOV count.
+- [x] **CRF gradient infrastructure** (`viterbi/train.rs`): `GoldSegmentation` (with `from_mecab_tsv`), `CrfGradient`, `compute_sentence_gradient()`, `accumulate_batch_gradient()`, `apply_conn_gradient_update()`, `ViterbiSolver::compute_edge_expected_counts()`. Foundation for online dictionary cost training.
+
 #### Deferred (next round)
-- [ ] CSR-flatten `nodes_at`/`ViterbiTable` (single contiguous allocation instead of Vec-of-Vecs)
 - [ ] `feature: String → Cow<'dict, str>` borrow refactor (eliminate K feature allocations per parse)
-- [ ] Exact lattice N-best via backward-A* (current N-best is approximate, single back-pointer per node)
-- [ ] Dictionary cost training (CRF/MaxEnt over `forward_backward` expectations + `matrix_writer`)
+- [ ] Dictionary cost training loop with matrix update + binary write-back (using CRF gradient infrastructure now in place)
+- [ ] `kizame train` command consuming annotated TSV corpus

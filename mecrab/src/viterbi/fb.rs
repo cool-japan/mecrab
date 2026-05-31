@@ -7,9 +7,18 @@
 //! from the deterministic Viterbi path-finding code in [`super`] to keep each
 //! algorithm self-contained and within the 2000-line refactoring policy limit.
 
+use std::collections::HashMap;
+
 use crate::lattice::Lattice;
 use crate::viterbi::analysis::{LatticeProbTable, NodeMarginal};
 use crate::viterbi::ViterbiSolver;
+
+/// Boltzmann temperature for converting integer MeCab costs to log-probabilities.
+///
+/// Dividing by 500 keeps `exp(-cost/T)` in a numerically workable range for
+/// typical IPADIC costs (±32 000).  Shared by `forward_backward` and the edge
+/// expected-count computation.
+const TEMPERATURE: f64 = 500.0;
 
 // ── Numerics ─────────────────────────────────────────────────────────────────
 
@@ -61,8 +70,6 @@ impl<'a> ViterbiSolver<'a> {
         &self,
         lattice: &'b Lattice<'b>,
     ) -> LatticeProbTable {
-        const TEMPERATURE: f64 = 500.0; // cost units per nat
-
         let n = lattice.len();
         if n == 0 {
             return LatticeProbTable::default();
@@ -283,6 +290,166 @@ impl<'a> ViterbiSolver<'a> {
             input_len,
             log_z,
         }
+    }
+
+    /// Compute expected edge counts from forward (alpha) and backward (beta) scores.
+    ///
+    /// Internally reruns the forward-backward algorithm to obtain the alpha and beta
+    /// tables, then computes edge marginals for every arc in the lattice.
+    ///
+    /// # Returns
+    /// A `HashMap<(right_id, left_id), expected_count>` where each entry is the
+    /// expected number of times that connection type is used across all possible
+    /// segmentations, weighted by their probability under the current model.
+    ///
+    /// The edge marginal for arc u→v is:
+    ///   p(u→v) = exp(alpha[u] + log_conn(u,v) + (-v.wcost/T) + beta[v] - log_Z)
+    #[allow(clippy::too_many_lines)]
+    pub fn compute_edge_expected_counts<'b>(
+        &self,
+        lattice: &'b Lattice<'b>,
+    ) -> HashMap<(u16, u16), f64> {
+        use crate::viterbi::train::edge_expected_counts_from_fb;
+
+        // Rerun forward-backward to build internal alpha/beta.
+        // We rebuild them here rather than exposing them from forward_backward to
+        // keep LatticeProbTable simple (it only needs marginals for the public API).
+        let n = lattice.len();
+        if n == 0 {
+            return HashMap::new();
+        }
+
+        // ── Forward pass (mirrors forward_backward exactly) ───────────────────
+        let mut alpha: Vec<Vec<f64>> = (0..n).map(|_| Vec::new()).collect();
+        {
+            let bos_nodes = lattice.nodes_ending_at(0);
+            alpha[0] = vec![0.0_f64; bos_nodes.len()];
+        }
+
+        for pos in 1..n {
+            let nodes = lattice.nodes_ending_at(pos);
+            let mut alpha_pos = vec![f64::NEG_INFINITY; nodes.len()];
+
+            for (j, node) in nodes.iter().enumerate() {
+                let wcost_contrib = -(node.wcost as f64) / TEMPERATURE;
+                let prev_pos = if node.start == 0 { 0_usize } else { node.start + 1 };
+
+                if prev_pos < n {
+                    let prev_nodes = lattice.nodes_ending_at(prev_pos);
+                    for (i, prev_node) in prev_nodes.iter().enumerate() {
+                        let conn = self
+                            .dictionary
+                            .connection_cost(prev_node.right_id, node.left_id)
+                            as f64;
+                        let score = alpha[prev_pos][i] + (-conn / TEMPERATURE) + wcost_contrib;
+                        alpha_pos[j] = log_sum_exp(alpha_pos[j], score);
+                    }
+                }
+
+                let span_limit = prev_pos.min(n);
+                let alpha_span = if span_limit > 1 {
+                    &alpha[1..span_limit]
+                } else {
+                    &alpha[0..0]
+                };
+                for (offset, alpha_check) in alpha_span.iter().enumerate() {
+                    let check_pos = 1 + offset;
+                    let check_nodes = lattice.nodes_ending_at(check_pos);
+                    for (i, prev_node) in check_nodes.iter().enumerate() {
+                        if prev_node.end == node.start {
+                            let conn = self
+                                .dictionary
+                                .connection_cost(prev_node.right_id, node.left_id)
+                                as f64;
+                            let score = alpha_check
+                                .get(i)
+                                .copied()
+                                .unwrap_or(f64::NEG_INFINITY)
+                                + (-conn / TEMPERATURE)
+                                + wcost_contrib;
+                            alpha_pos[j] = log_sum_exp(alpha_pos[j], score);
+                        }
+                    }
+                }
+            }
+
+            alpha[pos] = alpha_pos;
+        }
+
+        // ── Backward pass (mirrors forward_backward exactly) ──────────────────
+        let mut beta: Vec<Vec<f64>> = (0..n).map(|_| Vec::new()).collect();
+        {
+            let eos_nodes = lattice.nodes_ending_at(n - 1);
+            beta[n - 1] = vec![0.0_f64; eos_nodes.len()];
+        }
+
+        for pos in (0..n.saturating_sub(1)).rev() {
+            let nodes_at_pos = lattice.nodes_ending_at(pos);
+            let mut beta_pos = vec![f64::NEG_INFINITY; nodes_at_pos.len()];
+
+            let beta_slice_from_next = &beta[(pos + 1)..n];
+            for (offset, beta_row) in beta_slice_from_next.iter().enumerate() {
+                let next_pos = pos + 1 + offset;
+                let next_nodes = lattice.nodes_ending_at(next_pos);
+                for (j, next_node) in next_nodes.iter().enumerate() {
+                    let next_wcost_contrib = -(next_node.wcost as f64) / TEMPERATURE;
+                    let next_beta_j =
+                        beta_row.get(j).copied().unwrap_or(f64::NEG_INFINITY);
+                    if next_beta_j == f64::NEG_INFINITY {
+                        continue;
+                    }
+
+                    let expected_prev_pos = if next_node.start == 0 {
+                        0_usize
+                    } else {
+                        next_node.start + 1
+                    };
+
+                    if expected_prev_pos == pos {
+                        for (i, node) in nodes_at_pos.iter().enumerate() {
+                            let conn = self
+                                .dictionary
+                                .connection_cost(node.right_id, next_node.left_id)
+                                as f64;
+                            let score = next_beta_j + (-conn / TEMPERATURE) + next_wcost_contrib;
+                            beta_pos[i] = log_sum_exp(beta_pos[i], score);
+                        }
+                    } else if pos < expected_prev_pos {
+                        for (i, node) in nodes_at_pos.iter().enumerate() {
+                            if node.end == next_node.start {
+                                let conn = self
+                                    .dictionary
+                                    .connection_cost(node.right_id, next_node.left_id)
+                                    as f64;
+                                let score =
+                                    next_beta_j + (-conn / TEMPERATURE) + next_wcost_contrib;
+                                beta_pos[i] = log_sum_exp(beta_pos[i], score);
+                            }
+                        }
+                    }
+                }
+            }
+
+            beta[pos] = beta_pos;
+        }
+
+        // ── Partition function ────────────────────────────────────────────────
+        let bos_nodes = lattice.nodes_ending_at(0);
+        let log_z = bos_nodes
+            .iter()
+            .enumerate()
+            .fold(f64::NEG_INFINITY, |acc, (i, _)| {
+                let a = alpha[0].get(i).copied().unwrap_or(f64::NEG_INFINITY);
+                let b = beta[0].get(i).copied().unwrap_or(f64::NEG_INFINITY);
+                if a == f64::NEG_INFINITY || b == f64::NEG_INFINITY {
+                    acc
+                } else {
+                    log_sum_exp(acc, a + b)
+                }
+            });
+
+        // ── Delegate to train::edge_expected_counts_from_fb ──────────────────
+        edge_expected_counts_from_fb(lattice, &alpha, &beta, log_z, self.dictionary)
     }
 }
 

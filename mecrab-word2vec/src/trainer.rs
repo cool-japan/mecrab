@@ -991,6 +991,7 @@ mod tests {
             negative_samples: 2,
             min_count: 1,
             sample: 0.0,
+            subsample_threshold: 0.0,
             alpha: 0.025,
             min_alpha: 0.0001,
             epochs: 2,

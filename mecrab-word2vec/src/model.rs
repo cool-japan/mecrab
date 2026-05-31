@@ -67,10 +67,17 @@ pub struct TrainingConfig {
     pub window_size: usize,
     /// Number of negative samples
     pub negative_samples: usize,
-    /// Minimum word frequency
-    pub min_count: u64,
+    /// Discard words with frequency below this threshold during vocabulary building.
+    /// Words below min_count are treated as OOV during training.
+    pub min_count: u32,
     /// Subsampling threshold
     pub sample: f64,
+    /// Subsampling threshold for frequent words.
+    /// Words are discarded during training with probability: 1 - sqrt(t / freq)
+    /// where freq = word_count / total_words and t = subsample_threshold.
+    /// Set to 0.0 to disable subsampling.
+    /// Typical value: 1e-4 (= 0.0001).
+    pub subsample_threshold: f32,
     /// Initial learning rate
     pub alpha: f32,
     /// Minimum learning rate
@@ -96,6 +103,7 @@ impl Default for TrainingConfig {
             negative_samples: 5,
             min_count: 10,
             sample: 1e-4,
+            subsample_threshold: 0.0,
             alpha: 0.025,
             min_alpha: 0.0001,
             epochs: 3,
@@ -381,15 +389,28 @@ impl Word2VecBuilder {
         self
     }
 
-    /// Set minimum word count (default: 10)
-    pub fn min_count(mut self, count: u64) -> Self {
-        self.config.min_count = count;
+    /// Set minimum word count threshold (default: 10).
+    ///
+    /// Words whose corpus frequency falls below this value are excluded from
+    /// the vocabulary and treated as OOV during training.
+    pub fn min_count(mut self, min_count: u32) -> Self {
+        self.config.min_count = min_count;
         self
     }
 
     /// Set subsampling threshold (default: 1e-4)
     pub fn sample(mut self, threshold: f64) -> Self {
         self.config.sample = threshold;
+        self
+    }
+
+    /// Set the subsampling threshold for frequent words (default: 0.0 = disabled).
+    ///
+    /// Each word token is discarded during training with probability
+    /// `1 - sqrt(t / freq)` where `freq = word_count / total_words` and
+    /// `t = subsample_threshold`.  A typical value is `1e-4`.
+    pub fn subsample_threshold(mut self, threshold: f32) -> Self {
+        self.config.subsample_threshold = threshold;
         self
     }
 
@@ -459,7 +480,7 @@ impl Word2VecBuilder {
 
     /// Build vocabulary from corpus and create model
     pub fn build_from_corpus<P: AsRef<Path>>(self, corpus_path: P) -> Result<Word2Vec> {
-        let mut vocab = Vocabulary::new(self.config.min_count, self.config.sample);
+        let mut vocab = Vocabulary::new(self.config.min_count as u64, self.config.sample);
         vocab.build_from_file(&corpus_path)?;
 
         if vocab.is_empty() {

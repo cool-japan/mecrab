@@ -7,6 +7,7 @@ pub mod explore;
 #[cfg(feature = "lsp")]
 pub mod lsp;
 pub mod parse;
+pub mod score;
 #[cfg(feature = "server")]
 pub mod serve;
 pub mod vectors;

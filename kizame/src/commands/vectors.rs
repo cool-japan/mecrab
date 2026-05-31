@@ -29,13 +29,17 @@ pub enum VectorsCommands {
         #[arg(long, default_value = "5")]
         negative: usize,
 
-        /// Minimum word count
-        #[arg(long, default_value = "10")]
-        min_count: u64,
+        /// Minimum word frequency (words below are excluded from vocabulary)
+        #[arg(long = "min-count", default_value_t = 1)]
+        min_count: u32,
 
         /// Subsampling threshold (1e-4 = 0.0001)
         #[arg(long, default_value = "0.0001")]
         sample: f64,
+
+        /// Subsampling threshold for frequent words (0 = disabled, typical 1e-4)
+        #[arg(long = "subsample", default_value_t = 0.0)]
+        subsample_threshold: f32,
 
         /// Initial learning rate
         #[arg(long, default_value = "0.025")]
@@ -192,6 +196,7 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             negative,
             min_count,
             sample,
+            subsample_threshold,
             alpha,
             min_alpha,
             epochs,
@@ -212,6 +217,7 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             negative,
             min_count,
             sample,
+            subsample_threshold,
             alpha,
             min_alpha,
             epochs,
@@ -433,8 +439,9 @@ fn run_vectors_train(
     size: usize,
     window: usize,
     negative: usize,
-    min_count: u64,
+    min_count: u32,
     sample: f64,
+    subsample_threshold: f32,
     alpha: f32,
     min_alpha: f32,
     epochs: usize,
@@ -519,6 +526,7 @@ fn run_vectors_train(
         .negative_samples(negative)
         .min_count(min_count)
         .sample(sample)
+        .subsample_threshold(subsample_threshold)
         .alpha(alpha)
         .min_alpha(min_alpha)
         .epochs(epochs)
