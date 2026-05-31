@@ -90,15 +90,21 @@ struct ViterbiCold<'a> {
 
 /// Hybrid SoA Viterbi table.
 ///
-/// `costs[p]` and `cold[p]` are always the same length; entry `i` at lattice
-/// position `p` has cumulative cost `costs[p][i]` and metadata `cold[p][i]`.
+/// `costs[p]`, `right_ids[p]`, and `cold[p]` are always the same length;
+/// entry `i` at lattice position `p` has cumulative cost `costs[p][i]`,
+/// right-context ID `right_ids[p][i]`, and metadata `cold[p][i]`.
 ///
-/// Keeping costs in their own contiguous `Vec<i64>` per position means the
-/// inner min-finding loop touches only `costs[prev_pos]` — a single cache
-/// line friendly slice — before diving into `cold` only for the winner.
+/// Keeping costs and right_ids in their own contiguous `Vec` per position
+/// means the SIMD gather loop touches only `costs[prev_pos]` and
+/// `right_ids[prev_pos]` — cache-line friendly slices — before diving into
+/// `cold` only for the winner.
 struct ViterbiTable<'a> {
     /// Hot path: cumulative costs per lattice position
     costs: Vec<Vec<i64>>,
+    /// Hot path: right-context IDs per entry, parallel to `costs`.
+    /// Extracted from cold nodes at push-time to avoid pointer-chasing
+    /// in the SIMD gather loop.
+    right_ids: Vec<Vec<u16>>,
     /// Cold path: node references and backtrack data per lattice position
     cold: Vec<Vec<ViterbiCold<'a>>>,
 }
@@ -108,6 +114,7 @@ impl<'a> ViterbiTable<'a> {
     fn new(n: usize) -> Self {
         Self {
             costs: vec![Vec::new(); n],
+            right_ids: vec![Vec::new(); n],
             cold: vec![Vec::new(); n],
         }
     }
@@ -116,6 +123,7 @@ impl<'a> ViterbiTable<'a> {
     #[inline]
     fn push(&mut self, pos: usize, cost: i64, cold: ViterbiCold<'a>) {
         self.costs[pos].push(cost);
+        self.right_ids[pos].push(cold.node.right_id);
         self.cold[pos].push(cold);
     }
 
@@ -224,6 +232,7 @@ impl<'a> ViterbiSolver<'a> {
                     Self::scan_predecessors(
                         &table,
                         prev_pos,
+                        &table.right_ids[prev_pos],
                         node,
                         self.dictionary,
                         &mut best_cost,
@@ -273,18 +282,25 @@ impl<'a> ViterbiSolver<'a> {
         table
     }
 
-    /// Inner predecessor scan: iterates the **hot** cost slice for position
-    /// `prev_pos`, then reads cold data only for the winning candidate.
+    /// Inner predecessor scan: iterates the **hot** cost and right_id slices
+    /// for position `prev_pos`, then reads cold data only for the winning
+    /// candidate.
     ///
     /// Uses [`batch_connection_costs`] to gather and widen up to 16 connection
     /// costs at a time from the pre-fetched matrix row for `node.left_id`,
     /// amortising the per-node bounds-check overhead and enabling SIMD widening
     /// on aarch64 (NEON), x86_64 (AVX2/SSE4.1), and WASM (simd128).  On other
     /// platforms the function dispatches to its built-in scalar fallback.
+    ///
+    /// `right_ids_row` is `&table.right_ids[prev_pos]` — a contiguous hot slice
+    /// extracted at push-time, eliminating the indirect pointer dereferences that
+    /// would result from reading `cold[prev_pos][j].node.right_id` per element.
     #[inline]
+    #[allow(clippy::too_many_arguments)]
     fn scan_predecessors(
         table: &ViterbiTable<'_>,
         prev_pos: usize,
+        right_ids_row: &[u16],
         node: &LatticeNode<'_>,
         dictionary: &Dictionary,
         best_cost: &mut i64,
@@ -292,7 +308,6 @@ impl<'a> ViterbiSolver<'a> {
         best_prev_pos: &mut u32,
     ) {
         let cost_row = &table.costs[prev_pos];
-        let cold_row = &table.cold[prev_pos];
         let node_wcost = node.wcost as i64;
 
         // Pre-fetch the matrix row for this node's left_id once.
@@ -308,10 +323,8 @@ impl<'a> ViterbiSolver<'a> {
             while base < total {
                 let chunk_len = (total - base).min(BATCH);
 
-                // Fill right_ids_buf for this chunk.
-                for j in 0..chunk_len {
-                    right_ids_buf[j] = cold_row[base + j].node.right_id;
-                }
+                // Hot contiguous copy — no pointer chasing.
+                right_ids_buf[..chunk_len].copy_from_slice(&right_ids_row[base..base + chunk_len]);
 
                 // Batch gather: fill conn_buf[0..chunk_len] with widened i16→i32 costs.
                 // Dispatches to NEON / AVX2 / SSE4.1 / scalar based on target.
@@ -340,6 +353,8 @@ impl<'a> ViterbiSolver<'a> {
         }
 
         // Scalar fallback: OOB left_id — look up each cost individually.
+        // Cold data is accessed here only; it is not touched in the fast path above.
+        let cold_row = &table.cold[prev_pos];
         for (prev_idx, &prev_cost) in cost_row.iter().enumerate() {
             let cold = &cold_row[prev_idx];
             let conn_cost = dictionary.connection_cost(cold.node.right_id, node.left_id) as i64;
@@ -955,5 +970,68 @@ mod tests {
             "back-pointer must point to index 1 (cost=5)"
         );
         assert_eq!(table.cold[1][0].pos, 0);
+    }
+}
+
+// ── right_id hot-path tests ───────────────────────────────────────────────────
+
+#[cfg(test)]
+mod right_id_hot_tests {
+    use super::*;
+
+    /// Verify that `right_ids` is allocated in parallel with `costs` and `cold`
+    /// and starts empty for every position.
+    #[test]
+    fn test_viterbi_table_right_ids_parallel() {
+        let table = ViterbiTable::new(3);
+
+        assert_eq!(table.costs.len(), 3);
+        assert_eq!(table.right_ids.len(), 3);
+        assert_eq!(table.cold.len(), 3);
+
+        // All positions must start empty.
+        for pos in 0..3 {
+            assert!(table.right_ids[pos].is_empty());
+        }
+    }
+
+    /// Verify that `push` keeps `right_ids` in sync with `costs` and `cold`,
+    /// and that the stored value matches the node's `right_id`.
+    #[test]
+    fn test_viterbi_table_push_syncs_right_ids() {
+        let node = LatticeNode::bos(); // right_id == 0 for BOS
+        let mut table: ViterbiTable<'_> = ViterbiTable::new(2);
+
+        table.push(
+            0,
+            10,
+            ViterbiCold {
+                node: &node,
+                prev: None,
+                pos: 0,
+            },
+        );
+        table.push(
+            0,
+            20,
+            ViterbiCold {
+                node: &node,
+                prev: None,
+                pos: 0,
+            },
+        );
+
+        assert_eq!(table.right_ids[0].len(), 2, "right_ids length must match costs length");
+        assert_eq!(
+            table.right_ids[0][0], node.right_id,
+            "right_ids[0] must equal node.right_id"
+        );
+        assert_eq!(
+            table.right_ids[0][1], node.right_id,
+            "right_ids[1] must equal node.right_id"
+        );
+        // Parallel invariant: all three vecs must have the same length.
+        assert_eq!(table.costs[0].len(), table.right_ids[0].len());
+        assert_eq!(table.costs[0].len(), table.cold[0].len());
     }
 }

@@ -358,3 +358,47 @@ fn nfkc_normalized_input_segments() {
         result.morphemes
     );
 }
+
+// ── Hot-swap tests ────────────────────────────────────────────────────────────
+
+/// Overlay words added before a hot-swap must survive the swap.
+#[test]
+fn hot_swap_preserves_overlay() {
+    let d = build_synthetic_dictionary();
+    let mecrab =
+        mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+            .expect("synthetic dict load failed");
+
+    mecrab.add_word("テスト語", "テストゴ", "テストゴ", -500);
+    assert_eq!(mecrab.overlay_size(), 1, "overlay must have 1 entry before swap");
+
+    // Build a fresh dictionary from the same byte buffers and hot-swap.
+    let dict2 = mecrab::dict::Dictionary::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("dict2 load failed");
+    mecrab.hot_swap(dict2);
+
+    assert_eq!(
+        mecrab.overlay_size(),
+        1,
+        "overlay entry must survive hot_swap"
+    );
+}
+
+/// Parse must succeed both before and after a hot-swap.
+#[test]
+fn hot_swap_parse_continues() {
+    let d = build_synthetic_dictionary();
+    let mecrab =
+        mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+            .expect("synthetic dict load failed");
+
+    let r1 = mecrab.parse("すもも").expect("parse before swap failed");
+    assert!(!r1.morphemes.is_empty(), "must produce morphemes before swap");
+
+    let dict2 = mecrab::dict::Dictionary::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("dict2 load failed");
+    mecrab.hot_swap(dict2);
+
+    let r2 = mecrab.parse("すもも").expect("parse after swap failed");
+    assert!(!r2.morphemes.is_empty(), "must produce morphemes after swap");
+}

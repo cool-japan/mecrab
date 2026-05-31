@@ -20,6 +20,7 @@ thiserror.workspace = true
 yada.workspace = true
 bytemuck = { workspace = true }
 unicode-normalization = { workspace = true }
+arc-swap = { workspace = true }
 
 # Optional: JSON output support
 serde = { workspace = true, optional = true }

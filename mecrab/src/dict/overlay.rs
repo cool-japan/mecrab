@@ -316,6 +316,33 @@ impl OverlayDictionary {
         let entries = self.entries.read().unwrap_or_else(|e| e.into_inner());
         entries.keys().cloned().collect()
     }
+
+    /// Export all overlay entries for preservation across a dictionary hot-swap.
+    pub fn snapshot(&self) -> Vec<(String, Vec<OverlayEntry>)> {
+        self.entries
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .map(|(k, v)| (k.clone(), v.clone()))
+            .collect()
+    }
+
+    /// Merge a snapshot of entries back in (used after hot-swap to restore overlay words).
+    pub fn restore_from(&self, snapshot: Vec<(String, Vec<OverlayEntry>)>) {
+        if snapshot.is_empty() {
+            return;
+        }
+        {
+            let mut guard = self.entries.write().unwrap_or_else(|e| e.into_inner());
+            for (surface, entries) in snapshot {
+                guard.entry(surface).or_default().extend(entries);
+            }
+        }
+        // Mark trie as dirty so it is rebuilt on next lookup.
+        if let Ok(mut dirty) = self.trie_dirty.write() {
+            *dirty = true;
+        }
+    }
 }
 
 impl std::fmt::Debug for OverlayDictionary {

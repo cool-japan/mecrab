@@ -108,6 +108,7 @@ pub use viterbi::simd::batch_connection_costs;
 
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
 use dict::Dictionary;
 use lattice::Lattice;
 use viterbi::ViterbiSolver;
@@ -115,7 +116,7 @@ use viterbi::ViterbiSolver;
 /// The main MeCrab morphological analyzer
 #[derive(Clone)]
 pub struct MeCrab {
-    pub(crate) dictionary: Arc<Dictionary>,
+    pub(crate) dictionary: Arc<ArcSwap<Arc<Dictionary>>>,
     pub(crate) output_format: OutputFormat,
     pub(crate) semantic_enabled: bool,
     pub(crate) ipa_enabled: bool,
@@ -159,7 +160,7 @@ impl MeCrab {
                 Arc::new(IpadicProvider)
             };
         Self {
-            dictionary: Arc::new(dictionary),
+            dictionary: Arc::new(ArcSwap::new(Arc::new(Arc::new(dictionary)))),
             output_format: OutputFormat::default(),
             semantic_enabled: false,
             ipa_enabled: false,
@@ -229,11 +230,15 @@ impl MeCrab {
     ///
     /// Returns an error if parsing fails.
     pub fn parse(&self, text: &str) -> Result<AnalysisResult> {
+        // Load the current dictionary atomically; in-flight parses pin the old Arc.
+        let dict_guard = self.dictionary.load();
+        let dict = &***dict_guard;
+
         // Build the lattice
-        let lattice = Lattice::build(text, &self.dictionary)?;
+        let lattice = Lattice::build(text, dict)?;
 
         // Solve using Viterbi algorithm
-        let solver = ViterbiSolver::new(&self.dictionary);
+        let solver = ViterbiSolver::new(dict);
         let path = solver.solve(&lattice)?;
 
         // Convert path to morphemes with optional semantic and IPA enrichment
@@ -281,7 +286,8 @@ impl MeCrab {
 
     /// Get semantic entities for a surface form
     fn get_entities_for_surface(&self, surface: &str) -> Vec<semantic::EntityReference> {
-        if let Some(ref surface_map) = self.dictionary.surface_map {
+        let dict_guard = self.dictionary.load();
+        if let Some(ref surface_map) = dict_guard.surface_map {
             if let Some(uris) = surface_map.get(surface) {
                 return uris
                     .iter()
@@ -394,8 +400,8 @@ impl MeCrab {
     /// let result = mecrab.parse("ChatGPTを使う")?;
     /// ```
     pub fn add_word(&self, surface: &str, reading: &str, pronunciation: &str, wcost: i16) {
-        self.dictionary
-            .add_simple_word(surface, reading, pronunciation, wcost);
+        let guard = self.dictionary.load();
+        guard.add_simple_word(surface, reading, pronunciation, wcost);
     }
 
     /// Remove a word from the overlay dictionary
@@ -403,12 +409,14 @@ impl MeCrab {
     /// Returns true if the word was found and removed.
     /// Note: Only overlay words can be removed; system dictionary entries persist.
     pub fn remove_word(&self, surface: &str) -> bool {
-        self.dictionary.remove_word(surface)
+        let guard = self.dictionary.load();
+        guard.remove_word(surface)
     }
 
     /// Get the number of words in the overlay dictionary
     pub fn overlay_size(&self) -> usize {
-        self.dictionary.overlay_size()
+        let guard = self.dictionary.load();
+        guard.overlay_size()
     }
 
     /// Parse the input text and return N-best analysis results
@@ -425,11 +433,14 @@ impl MeCrab {
     ///
     /// Returns an error if parsing fails.
     pub fn parse_nbest(&self, text: &str, n: usize) -> Result<Vec<(AnalysisResult, i64)>> {
+        let dict_guard = self.dictionary.load();
+        let dict = &***dict_guard;
+
         // Build the lattice
-        let lattice = Lattice::build(text, &self.dictionary)?;
+        let lattice = Lattice::build(text, dict)?;
 
         // Solve using Viterbi algorithm with N-best
-        let solver = ViterbiSolver::new(&self.dictionary);
+        let solver = ViterbiSolver::new(dict);
         let paths = solver.solve_nbest(&lattice, n)?;
 
         // Convert paths to analysis results
@@ -501,8 +512,10 @@ impl MeCrab {
         &self,
         text: &str,
     ) -> Result<(AnalysisResult, crate::viterbi::analysis::LatticeProbTable)> {
-        let lattice = Lattice::build(text, &self.dictionary)?;
-        let solver = ViterbiSolver::new(&self.dictionary);
+        let dict_guard = self.dictionary.load();
+        let dict = &***dict_guard;
+        let lattice = Lattice::build(text, dict)?;
+        let solver = ViterbiSolver::new(dict);
         let path = solver.solve(&lattice)?;
         let probs = solver.forward_backward(&lattice);
 
@@ -605,6 +618,31 @@ impl MeCrab {
             .nth(best_idx)
             .map(|(result, _cost)| result)
             .ok_or_else(|| Error::ViterbiError("Reranker returned out-of-bounds index".into()))
+    }
+
+    /// Atomically swap the underlying dictionary with a pre-built one.
+    /// In-flight parses with the old dictionary complete correctly;
+    /// new parses immediately use `new_dict`.
+    /// Overlay words from the previous dictionary are preserved.
+    pub fn hot_swap(&self, new_dict: Dictionary) {
+        let snapshot = {
+            let guard = self.dictionary.load();
+            guard.overlay.snapshot()
+        };
+        new_dict.overlay.restore_from(snapshot);
+        self.dictionary.store(Arc::new(Arc::new(new_dict)));
+    }
+
+    /// Reload the dictionary from `path` without restarting.
+    /// Overlay words added via `add_word` are preserved across the reload.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the new dictionary cannot be loaded from `path`.
+    pub fn hot_reload(&self, path: &std::path::Path) -> Result<()> {
+        let new_dict = Dictionary::load(path)?;
+        self.hot_swap(new_dict);
+        Ok(())
     }
 }
 
@@ -823,6 +861,55 @@ mod tests {
         assert_eq!(chunks[0].0, "食べられた");
         assert_eq!(chunks[0].1, 0);
         assert_eq!(chunks[0].2, 15);
+    }
+
+    #[test]
+    fn test_hot_swap_preserves_overlay() {
+        // Use from_bytes via SyntheticDictionary raw buffers to avoid the
+        // duplicate-crate-type (cdylib vs rlib) type mismatch that occurs when
+        // calling mecrab_builder::SyntheticDictionary::load() directly.
+        use mecrab_builder::build_synthetic_dictionary;
+        let sd1 = build_synthetic_dictionary();
+        let dict1 = crate::dict::Dictionary::from_bytes(
+            &sd1.sys_dic, &sd1.matrix, &sd1.char_def, &sd1.unk_def,
+        )
+        .expect("dict1 load");
+        let mecrab = MeCrab::from_dictionary(dict1);
+        mecrab.add_word("テスト語", "テストゴ", "テストゴ", -500);
+        assert_eq!(mecrab.overlay_size(), 1);
+
+        let sd2 = build_synthetic_dictionary();
+        let dict2 = crate::dict::Dictionary::from_bytes(
+            &sd2.sys_dic, &sd2.matrix, &sd2.char_def, &sd2.unk_def,
+        )
+        .expect("dict2 load");
+        mecrab.hot_swap(dict2);
+
+        // Overlay must survive the swap
+        assert_eq!(mecrab.overlay_size(), 1);
+    }
+
+    #[test]
+    fn test_hot_swap_parse_continues() {
+        use mecrab_builder::build_synthetic_dictionary;
+        let sd1 = build_synthetic_dictionary();
+        let dict1 = crate::dict::Dictionary::from_bytes(
+            &sd1.sys_dic, &sd1.matrix, &sd1.char_def, &sd1.unk_def,
+        )
+        .expect("dict1 load");
+        let mecrab = MeCrab::from_dictionary(dict1);
+        let r1 = mecrab.parse("すもも").expect("parse1");
+        assert!(!r1.morphemes.is_empty());
+
+        let sd2 = build_synthetic_dictionary();
+        let dict2 = crate::dict::Dictionary::from_bytes(
+            &sd2.sys_dic, &sd2.matrix, &sd2.char_def, &sd2.unk_def,
+        )
+        .expect("dict2 load");
+        mecrab.hot_swap(dict2);
+
+        let r2 = mecrab.parse("すもも").expect("parse2");
+        assert!(!r2.morphemes.is_empty());
     }
 
     #[cfg(feature = "parallel")]

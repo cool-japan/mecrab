@@ -8,6 +8,8 @@ use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 
+use arc_swap::ArcSwap;
+
 use crate::MeCrab;
 use crate::dict::Dictionary;
 use crate::dict::provider::{AutoDetectProvider, DictionaryProvider, IpadicProvider};
@@ -205,7 +207,7 @@ impl MeCrabBuilder {
         };
 
         Ok(MeCrab {
-            dictionary: Arc::new(dictionary),
+            dictionary: Arc::new(ArcSwap::new(Arc::new(Arc::new(dictionary)))),
             output_format: self.output_format,
             semantic_enabled: self.with_semantic,
             ipa_enabled: self.with_ipa,

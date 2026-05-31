@@ -35,12 +35,14 @@ mod skipgram;
 pub mod subword;
 mod trainer;
 mod vocab;
+pub mod bpe;
 
 /// GPU-accelerated training via wgpu (enabled by `--features gpu`).
 /// Falls back to CPU Hogwild! when no adapter is available.
 #[cfg(feature = "gpu")]
 pub mod gpu;
 
+pub use bpe::{BpeMerge, BpeTrainer, BpeVocab};
 pub use model::{SubwordConfig, Word2Vec, Word2VecBuilder};
 pub use subword::CharNgramExtractor;
 pub use vocab::Vocabulary;

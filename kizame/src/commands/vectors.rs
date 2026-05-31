@@ -153,6 +153,25 @@ pub enum VectorsCommands {
         #[arg(short = 'd', long)]
         dicdir: Option<PathBuf>,
     },
+    /// Train BPE vocabulary from tokenized corpus
+    Bpe {
+        /// Input corpus file (space-separated morpheme surfaces per line,
+        /// as output by `kizame vectors tokenize`)
+        #[arg(short = 'i', long)]
+        input: PathBuf,
+
+        /// Output vocabulary file (JSON format)
+        #[arg(short = 'o', long)]
+        output: PathBuf,
+
+        /// Target vocabulary size (number of BPE symbols)
+        #[arg(long, default_value = "32000")]
+        vocab_size: usize,
+
+        /// Minimum token pair frequency to merge
+        #[arg(long, default_value = "2")]
+        min_frequency: u64,
+    },
 }
 
 pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::Error>> {
@@ -216,6 +235,12 @@ pub fn run_vectors(command: VectorsCommands) -> Result<(), Box<dyn std::error::E
             vocab,
             dicdir,
         } => run_vectors_query(&vectors, &word, topn, vocab.as_ref(), dicdir),
+        VectorsCommands::Bpe {
+            input,
+            output,
+            vocab_size,
+            min_frequency,
+        } => run_vectors_bpe(&input, &output, vocab_size, min_frequency),
     }
 }
 
@@ -653,6 +678,38 @@ fn run_vectors_query(
         println!("{:<40} {:>8.4}", label, score);
     }
 
+    Ok(())
+}
+
+fn run_vectors_bpe(
+    input: &Path,
+    output: &Path,
+    vocab_size: usize,
+    min_frequency: u64,
+) -> Result<(), Box<dyn std::error::Error>> {
+    use mecrab_word2vec::BpeTrainer;
+    use std::io::{BufRead, BufReader};
+
+    let file = std::fs::File::open(input)
+        .map_err(|e| format!("Cannot open corpus '{path}': {e}", path = input.display()))?;
+    let reader = BufReader::new(file);
+    let lines = reader.lines().map_while(Result::ok);
+
+    let trainer = BpeTrainer::new(vocab_size).with_min_frequency(min_frequency);
+    let vocab = trainer
+        .train(lines)
+        .map_err(|e| format!("BPE training failed: {e}"))?;
+
+    vocab
+        .save_json(output)
+        .map_err(|e| format!("Cannot save vocab to '{path}': {e}", path = output.display()))?;
+
+    println!(
+        "Trained BPE: {} merges, {} symbols → {}",
+        vocab.merges.len(),
+        vocab.vocab.len(),
+        output.display()
+    );
     Ok(())
 }
 
