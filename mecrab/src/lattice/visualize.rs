@@ -291,7 +291,8 @@ impl<'a> DotBuilder<'a> {
                 };
 
                 // Handle EOS specially
-                if node.feature.as_ref() == "BOS/EOS" && end_pos == self.lattice.nodes_at.len() - 1 {
+                if node.feature.as_ref() == "BOS/EOS" && end_pos == self.lattice.nodes_at.len() - 1
+                {
                     // EOS: find all nodes ending at text.len()
                     let text_len = self.lattice.text.len();
                     if text_len + 1 < self.lattice.nodes_at.len() {

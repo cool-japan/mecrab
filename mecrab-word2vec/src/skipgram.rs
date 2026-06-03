@@ -47,10 +47,7 @@ impl AliasTable {
         // ── Step 2: populate word_ids and compute scaled probabilities in [0, n] ──
         let word_ids: Vec<u32> = raw.iter().map(|(id, _)| *id).collect();
         // scaled[i] = (raw_prob[i] / total) * n
-        let mut scaled: Vec<f64> = raw
-            .iter()
-            .map(|(_, p)| (p / total) * (n as f64))
-            .collect();
+        let mut scaled: Vec<f64> = raw.iter().map(|(_, p)| (p / total) * (n as f64)).collect();
 
         let mut prob = vec![0.0f64; n];
         let mut alias = vec![0u32; n];

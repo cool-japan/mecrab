@@ -311,7 +311,6 @@ impl Default for CharCacheEntry {
     }
 }
 
-
 #[cfg(test)]
 mod tests {
     use super::*;

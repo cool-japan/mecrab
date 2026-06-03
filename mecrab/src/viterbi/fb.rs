@@ -10,8 +10,8 @@
 use std::collections::HashMap;
 
 use crate::lattice::Lattice;
-use crate::viterbi::analysis::{LatticeProbTable, NodeMarginal};
 use crate::viterbi::ViterbiSolver;
+use crate::viterbi::analysis::{LatticeProbTable, NodeMarginal};
 
 /// Boltzmann temperature for converting integer MeCab costs to log-probabilities.
 ///
@@ -66,10 +66,7 @@ impl<'a> ViterbiSolver<'a> {
     /// A [`crate::viterbi::analysis::LatticeProbTable`] with per-node marginals.
     /// The `by_position` field mirrors the lattice `nodes_at` indexing.
     #[allow(clippy::too_many_lines)]
-    pub fn forward_backward<'b>(
-        &self,
-        lattice: &'b Lattice<'b>,
-    ) -> LatticeProbTable {
+    pub fn forward_backward<'b>(&self, lattice: &'b Lattice<'b>) -> LatticeProbTable {
         let n = lattice.len();
         if n == 0 {
             return LatticeProbTable::default();
@@ -332,7 +329,11 @@ impl<'a> ViterbiSolver<'a> {
 
             for (j, node) in nodes.iter().enumerate() {
                 let wcost_contrib = -(node.wcost as f64) / TEMPERATURE;
-                let prev_pos = if node.start == 0 { 0_usize } else { node.start + 1 };
+                let prev_pos = if node.start == 0 {
+                    0_usize
+                } else {
+                    node.start + 1
+                };
 
                 if prev_pos < n {
                     let prev_nodes = lattice.nodes_ending_at(prev_pos);
@@ -361,10 +362,7 @@ impl<'a> ViterbiSolver<'a> {
                                 .dictionary
                                 .connection_cost(prev_node.right_id, node.left_id)
                                 as f64;
-                            let score = alpha_check
-                                .get(i)
-                                .copied()
-                                .unwrap_or(f64::NEG_INFINITY)
+                            let score = alpha_check.get(i).copied().unwrap_or(f64::NEG_INFINITY)
                                 + (-conn / TEMPERATURE)
                                 + wcost_contrib;
                             alpha_pos[j] = log_sum_exp(alpha_pos[j], score);
@@ -393,8 +391,7 @@ impl<'a> ViterbiSolver<'a> {
                 let next_nodes = lattice.nodes_ending_at(next_pos);
                 for (j, next_node) in next_nodes.iter().enumerate() {
                     let next_wcost_contrib = -(next_node.wcost as f64) / TEMPERATURE;
-                    let next_beta_j =
-                        beta_row.get(j).copied().unwrap_or(f64::NEG_INFINITY);
+                    let next_beta_j = beta_row.get(j).copied().unwrap_or(f64::NEG_INFINITY);
                     if next_beta_j == f64::NEG_INFINITY {
                         continue;
                     }

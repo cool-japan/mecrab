@@ -728,9 +728,12 @@ fn run_vectors_bpe(
         .train(lines)
         .map_err(|e| format!("BPE training failed: {e}"))?;
 
-    vocab
-        .save_json(output)
-        .map_err(|e| format!("Cannot save vocab to '{path}': {e}", path = output.display()))?;
+    vocab.save_json(output).map_err(|e| {
+        format!(
+            "Cannot save vocab to '{path}': {e}",
+            path = output.display()
+        )
+    })?;
 
     println!(
         "Trained BPE: {} merges, {} symbols → {}",

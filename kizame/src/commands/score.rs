@@ -67,12 +67,7 @@ impl<'a> ScoreRow<'a> {
     fn as_tsv(&self) -> String {
         format!(
             "{}\t{}\t{:.6}\t{:.6}\t{}\t{}",
-            self.text,
-            self.viterbi_cost,
-            self.perplexity,
-            self.entropy,
-            self.morphemes,
-            self.oov,
+            self.text, self.viterbi_cost, self.perplexity, self.entropy, self.morphemes, self.oov,
         )
     }
 
@@ -82,11 +77,7 @@ impl<'a> ScoreRow<'a> {
         let escaped = escape_json_str(self.text);
         format!(
             "{{\"text\":{escaped},\"viterbi_cost\":{},\"perplexity\":{:.6},\"entropy\":{:.6},\"morphemes\":{},\"oov\":{}}}",
-            self.viterbi_cost,
-            self.perplexity,
-            self.entropy,
-            self.morphemes,
-            self.oov,
+            self.viterbi_cost, self.perplexity, self.entropy, self.morphemes, self.oov,
         )
     }
 
@@ -100,12 +91,7 @@ impl<'a> ScoreRow<'a> {
              Morphemes  : {}\n\
              OOV tokens : {}\n\
              ---",
-            self.text,
-            self.viterbi_cost,
-            self.perplexity,
-            self.entropy,
-            self.morphemes,
-            self.oov,
+            self.text, self.viterbi_cost, self.perplexity, self.entropy, self.morphemes, self.oov,
         )
     }
 }
@@ -150,11 +136,7 @@ fn score_line<'a>(
 ) -> Result<ScoreRow<'a>, Box<dyn std::error::Error>> {
     // Viterbi parse for cost + OOV count
     let result = mecrab.parse(text)?;
-    let viterbi_cost: i64 = result
-        .morphemes
-        .iter()
-        .map(|m| m.wcost as i64)
-        .sum();
+    let viterbi_cost: i64 = result.morphemes.iter().map(|m| m.wcost as i64).sum();
     let oov = count_oov(&result);
     let morpheme_count_viterbi = result.morphemes.len();
 
@@ -192,9 +174,7 @@ pub fn run_score(args: ScoreArgs) -> Result<(), Box<dyn std::error::Error>> {
         ScoreOutput::Tsv
     };
 
-    let builder = MeCrab::builder()
-        .dicdir(args.dicdir)
-        .userdic(args.userdic);
+    let builder = MeCrab::builder().dicdir(args.dicdir).userdic(args.userdic);
 
     let mecrab = match args.dict_format {
         DictFormatArg::Auto => builder.build()?,
@@ -207,7 +187,10 @@ pub fn run_score(args: ScoreArgs) -> Result<(), Box<dyn std::error::Error>> {
 
     // Print TSV header when writing to a terminal in TSV mode.
     if mode == ScoreOutput::Tsv && io::stdout().is_terminal() {
-        writeln!(stdout, "text\tviterbi_cost\tperplexity\tentropy\tmorphemes\toov")?;
+        writeln!(
+            stdout,
+            "text\tviterbi_cost\tperplexity\tentropy\tmorphemes\toov"
+        )?;
     }
 
     // Branch on input source.

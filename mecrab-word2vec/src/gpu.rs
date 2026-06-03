@@ -208,12 +208,7 @@ impl<'a> GpuTrainer<'a> {
     /// end of training to retrieve the updated weights.
     ///
     /// [`read_back`]: GpuTrainer::read_back
-    pub fn new(
-        ctx: &'a GpuContext,
-        syn0: &[f32],
-        syn1neg: &[f32],
-        vector_size: usize,
-    ) -> Self {
+    pub fn new(ctx: &'a GpuContext, syn0: &[f32], syn1neg: &[f32], vector_size: usize) -> Self {
         let device = &ctx.device;
         let queue = &ctx.queue;
 
@@ -226,56 +221,55 @@ impl<'a> GpuTrainer<'a> {
         });
 
         // ── Bind group layout ─────────────────────────────────────────────────
-        let bind_group_layout =
-            device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-                label: Some("word2vec_bgl"),
-                entries: &[
-                    // binding 0 — syn0 (read_write storage)
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 0,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+        let bind_group_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("word2vec_bgl"),
+            entries: &[
+                // binding 0 — syn0 (read_write storage)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // binding 1 — syn1neg (read_write storage)
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 1,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: false },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // binding 1 — syn1neg (read_write storage)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 1,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: false },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // binding 2 — pairs (read-only storage)
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 2,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Storage { read_only: true },
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // binding 2 — pairs (read-only storage)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 2,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Storage { read_only: true },
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                    // binding 3 — params (uniform)
-                    wgpu::BindGroupLayoutEntry {
-                        binding: 3,
-                        visibility: wgpu::ShaderStages::COMPUTE,
-                        ty: wgpu::BindingType::Buffer {
-                            ty: wgpu::BufferBindingType::Uniform,
-                            has_dynamic_offset: false,
-                            min_binding_size: None,
-                        },
-                        count: None,
+                    count: None,
+                },
+                // binding 3 — params (uniform)
+                wgpu::BindGroupLayoutEntry {
+                    binding: 3,
+                    visibility: wgpu::ShaderStages::COMPUTE,
+                    ty: wgpu::BindingType::Buffer {
+                        ty: wgpu::BufferBindingType::Uniform,
+                        has_dynamic_offset: false,
+                        min_binding_size: None,
                     },
-                ],
-            });
+                    count: None,
+                },
+            ],
+        });
 
         // ── Pipeline layout + compute pipeline ───────────────────────────────
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -414,10 +408,9 @@ impl<'a> GpuTrainer<'a> {
         });
 
         // ── Encode + dispatch ─────────────────────────────────────────────────
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("word2vec_enc"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("word2vec_enc"),
+        });
         {
             let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
                 label: Some("word2vec_pass"),
@@ -458,18 +451,19 @@ impl<'a> GpuTrainer<'a> {
             mapped_at_creation: false,
         });
 
-        let mut encoder =
-            device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
-                label: Some("readback_enc"),
-            });
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("readback_enc"),
+        });
         encoder.copy_buffer_to_buffer(src, 0, &staging, 0, dst.len() as u64);
         queue.submit([encoder.finish()]);
 
         // Map → copy → unmap
         let (tx, rx) = std::sync::mpsc::channel::<bool>();
-        staging.slice(..).map_async(wgpu::MapMode::Read, move |res| {
-            let _ = tx.send(res.is_ok());
-        });
+        staging
+            .slice(..)
+            .map_async(wgpu::MapMode::Read, move |res| {
+                let _ = tx.send(res.is_ok());
+            });
         let _ = device.poll(wgpu::PollType::wait_indefinitely());
         let success = rx.recv().unwrap_or(false);
         if success {

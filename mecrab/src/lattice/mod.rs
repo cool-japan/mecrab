@@ -47,13 +47,12 @@ impl ParseConstraints {
     /// Add a forced span: `text[start..end]` must be exactly one token.
     ///
     /// `feature` is an optional IPADIC feature string; `None` means auto-detect.
-    pub fn add_span(
-        &mut self,
-        start: usize,
-        end: usize,
-        feature: Option<String>,
-    ) -> &mut Self {
-        self.spans.push(ForcedSpan { start, end, feature });
+    pub fn add_span(&mut self, start: usize, end: usize, feature: Option<String>) -> &mut Self {
+        self.spans.push(ForcedSpan {
+            start,
+            end,
+            feature,
+        });
         self
     }
 
@@ -495,9 +494,7 @@ impl<'a> Lattice<'a> {
             // Try a dictionary lookup for the exact span surface.
             let surface_slice = &text[s..e];
             let entries = dict.lookup(surface_slice);
-            let exact_entry = entries
-                .into_iter()
-                .find(|entry| entry.length == e - s);
+            let exact_entry = entries.into_iter().find(|entry| entry.length == e - s);
 
             let node = if let Some(entry) = exact_entry {
                 let feature: Arc<str> = match &span.feature {

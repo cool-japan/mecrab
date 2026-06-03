@@ -439,10 +439,7 @@ impl Word2Vec {
             })
             .collect();
 
-        scores.sort_unstable_by(|a, b| {
-            b.1.partial_cmp(&a.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scores.sort_unstable_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(k);
         scores
     }
@@ -496,10 +493,7 @@ impl Word2Vec {
             })
             .collect();
 
-        scores.sort_unstable_by(|x, y| {
-            y.1.partial_cmp(&x.1)
-                .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        scores.sort_unstable_by(|x, y| y.1.partial_cmp(&x.1).unwrap_or(std::cmp::Ordering::Equal));
         scores.truncate(k);
         scores
     }
@@ -553,8 +547,7 @@ impl Word2Vec {
     pub fn load_text<P: AsRef<Path>>(path: P) -> Result<Self> {
         use std::io::{BufRead, BufReader};
 
-        let file = std::fs::File::open(path.as_ref())
-            .map_err(Word2VecError::Io)?;
+        let file = std::fs::File::open(path.as_ref()).map_err(Word2VecError::Io)?;
         let reader = BufReader::new(file);
         let mut lines = reader.lines();
 
@@ -619,9 +612,7 @@ impl Word2Vec {
             syn0.extend_from_slice(&vec);
 
             // Try to interpret the label as a numeric word_id; fall back to counter.
-            let word_id: u32 = word_label
-                .parse::<u32>()
-                .unwrap_or(word_id_counter);
+            let word_id: u32 = word_label.parse::<u32>().unwrap_or(word_id_counter);
 
             // position in vocab_entries == remapped_id
             let remapped_id = vocab_entries.len() as u32;
@@ -879,7 +870,10 @@ mod tests {
         for a in 0u32..=3 {
             for b in (a + 1)..=5 {
                 if let (Some(ab), Some(ba)) = (model.similarity(a, b), model.similarity(b, a)) {
-                    assert!((ab - ba).abs() < 1e-5, "not symmetric ({a},{b}): {ab} vs {ba}");
+                    assert!(
+                        (ab - ba).abs() < 1e-5,
+                        "not symmetric ({a},{b}): {ab} vs {ba}"
+                    );
                 }
             }
         }
@@ -1008,7 +1002,10 @@ mod tests {
         model.train_from_file(&corpus).expect("train");
         let (a, b, c) = (0u32, 1u32, 2u32);
         for &(id, _) in &model.analogy(a, b, c, 5) {
-            assert!(id != a && id != b && id != c, "must exclude inputs, got {id}");
+            assert!(
+                id != a && id != b && id != c,
+                "must exclude inputs, got {id}"
+            );
         }
         let _ = std::fs::remove_file(&corpus);
     }

@@ -29,13 +29,13 @@
 //! # Ok::<(), anyhow::Error>(())
 //! ```
 
+pub mod bpe;
 mod io;
 mod model;
 mod skipgram;
 pub mod subword;
 mod trainer;
 mod vocab;
-pub mod bpe;
 
 /// GPU-accelerated training via wgpu (enabled by `--features gpu`).
 /// Falls back to CPU Hogwild! when no adapter is available.
@@ -633,8 +633,7 @@ mod integration_tests {
             .subsec_nanos();
         let corpus_path = tmp_dir.join(format!("mecrab_cbow_test_{nanos}.txt"));
         {
-            let mut f = std::fs::File::create(&corpus_path)
-                .expect("create cbow test corpus");
+            let mut f = std::fs::File::create(&corpus_path).expect("create cbow test corpus");
             for _ in 0..20 {
                 writeln!(f, "0 1 2 3 4 5").expect("write corpus line");
             }
@@ -649,7 +648,11 @@ mod integration_tests {
 
         let _ = std::fs::remove_file(&corpus_path);
 
-        assert!(model.is_ok(), "CBOW build_from_corpus should succeed: {:?}", model.err());
+        assert!(
+            model.is_ok(),
+            "CBOW build_from_corpus should succeed: {:?}",
+            model.err()
+        );
         let mut model = model.expect("already checked Ok");
 
         // Re-create the corpus for training (it was removed above — make a fresh one)
@@ -657,11 +660,9 @@ mod integration_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let corpus_path2 = std::env::temp_dir()
-            .join(format!("mecrab_cbow_test2_{nanos2}.txt"));
+        let corpus_path2 = std::env::temp_dir().join(format!("mecrab_cbow_test2_{nanos2}.txt"));
         {
-            let mut f = std::fs::File::create(&corpus_path2)
-                .expect("create cbow test corpus 2");
+            let mut f = std::fs::File::create(&corpus_path2).expect("create cbow test corpus 2");
             for _ in 0..20 {
                 writeln!(f, "0 1 2 3 4 5").expect("write corpus line");
             }
@@ -670,11 +671,18 @@ mod integration_tests {
         let result = model.train_from_file(&corpus_path2);
         let _ = std::fs::remove_file(&corpus_path2);
 
-        assert!(result.is_ok(), "CBOW train_from_file should succeed: {:?}", result.err());
+        assert!(
+            result.is_ok(),
+            "CBOW train_from_file should succeed: {:?}",
+            result.err()
+        );
 
         // All embeddings must be finite after CBOW training
         for (i, &v) in model.syn0.iter().enumerate() {
-            assert!(v.is_finite(), "syn0[{i}] must be finite after CBOW training, got {v}");
+            assert!(
+                v.is_finite(),
+                "syn0[{i}] must be finite after CBOW training, got {v}"
+            );
         }
     }
 }

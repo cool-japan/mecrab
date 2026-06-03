@@ -31,9 +31,9 @@ pub mod x86;
 #[cfg(target_arch = "aarch64")]
 use neon::neon_gather;
 #[cfg(target_arch = "aarch64")]
-pub use neon::neon_impl;
-#[cfg(target_arch = "aarch64")]
 use neon::neon_i64;
+#[cfg(target_arch = "aarch64")]
+pub use neon::neon_impl;
 
 #[cfg(target_arch = "x86_64")]
 use x86::x86_gather;
@@ -43,9 +43,9 @@ pub use x86::x86_impl;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use wasm::wasm_gather;
 #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
-use wasm::wasm32_simd;
-#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
 use wasm::wasm_i64;
+#[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
+use wasm::wasm32_simd;
 
 pub use scalar as scalar_impl;
 
@@ -229,17 +229,13 @@ pub fn batch_min_argmin_i64(
     #[cfg(target_arch = "aarch64")]
     {
         // SAFETY: NEON is mandatory on all ARMv8 / Apple Silicon; no runtime check needed.
-        return unsafe {
-            neon_i64::batch_min_argmin_i64_neon(prev, conn, wcost, best_so_far)
-        };
+        return unsafe { neon_i64::batch_min_argmin_i64_neon(prev, conn, wcost, best_so_far) };
     }
 
     #[cfg(all(target_arch = "wasm32", target_feature = "simd128"))]
     {
         // SAFETY: simd128 compile-time cfg guarantees the feature is available.
-        return unsafe {
-            wasm_i64::batch_min_argmin_i64_wasm(prev, conn, wcost, best_so_far)
-        };
+        return unsafe { wasm_i64::batch_min_argmin_i64_wasm(prev, conn, wcost, best_so_far) };
     }
 
     #[cfg(target_arch = "x86_64")]

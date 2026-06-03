@@ -414,7 +414,10 @@ impl SysDic {
         // Slow path: build the Arc<str> and insert under write lock.
         // `entry().or_insert` handles the race between the two lock acquisitions.
         let new_arc: Arc<str> = Arc::from(self.get_feature(token));
-        let mut cache = self.feature_cache.write().unwrap_or_else(|e| e.into_inner());
+        let mut cache = self
+            .feature_cache
+            .write()
+            .unwrap_or_else(|e| e.into_inner());
         Arc::clone(cache.entry(offset).or_insert(new_arc))
     }
 

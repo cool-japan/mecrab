@@ -5,7 +5,6 @@
 //! This module handles the feature string table that maps feature IDs
 //! to human-readable feature strings (POS, reading, pronunciation, etc.).
 
-
 /// Feature table storing feature strings
 #[derive(Debug)]
 pub struct FeatureTable {

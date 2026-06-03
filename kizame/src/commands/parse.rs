@@ -5,7 +5,9 @@
 use crate::commands::{Format, colors, pos_color};
 use clap::{Args, ValueEnum};
 use mecrab::api::format::format_lattice_prob;
-use mecrab::{IpadicProvider, MeCrab, NeologdProvider, OutputFormat, ParseConstraints, UnidicProvider};
+use mecrab::{
+    IpadicProvider, MeCrab, NeologdProvider, OutputFormat, ParseConstraints, UnidicProvider,
+};
 use std::io::{self, BufRead, IsTerminal, Write};
 use std::path::PathBuf;
 
@@ -121,12 +123,18 @@ fn parse_span_str(s: &str) -> Result<(usize, usize), String> {
     let (start_s, end_s) = s
         .split_once(':')
         .ok_or_else(|| format!("invalid span '{}': expected format START:END", s))?;
-    let start = start_s
-        .parse::<usize>()
-        .map_err(|_| format!("invalid span '{}': '{}' is not a valid byte offset", s, start_s))?;
-    let end = end_s
-        .parse::<usize>()
-        .map_err(|_| format!("invalid span '{}': '{}' is not a valid byte offset", s, end_s))?;
+    let start = start_s.parse::<usize>().map_err(|_| {
+        format!(
+            "invalid span '{}': '{}' is not a valid byte offset",
+            s, start_s
+        )
+    })?;
+    let end = end_s.parse::<usize>().map_err(|_| {
+        format!(
+            "invalid span '{}': '{}' is not a valid byte offset",
+            s, end_s
+        )
+    })?;
     if start >= end {
         return Err(format!(
             "invalid span '{}': start ({}) must be less than end ({})",
@@ -140,10 +148,7 @@ fn parse_span_str(s: &str) -> Result<(usize, usize), String> {
 ///
 /// Format: `SURFACE\t[morph1 morph2 ...]`
 /// Followed by `EOS`.
-fn write_bunsetsu_result<W: Write>(
-    w: &mut W,
-    result: &mecrab::AnalysisResult,
-) -> io::Result<()> {
+fn write_bunsetsu_result<W: Write>(w: &mut W, result: &mecrab::AnalysisResult) -> io::Result<()> {
     let chunks = result.bunsetsu();
     for chunk in &chunks {
         let morph_surfaces: Vec<&str> = result.morphemes[chunk.morpheme_range.clone()]
@@ -191,7 +196,9 @@ pub fn run_parse(args: ParseArgs) -> Result<(), Box<dyn std::error::Error>> {
         .collect::<Result<Vec<_>, _>>()?;
 
     // Warn if --bunsetsu is combined with -O or -F (bunsetsu takes priority).
-    if args.bunsetsu && (args.node_format.is_some() || args.output_format != Format::Default || args.wakati) {
+    if args.bunsetsu
+        && (args.node_format.is_some() || args.output_format != Format::Default || args.wakati)
+    {
         eprintln!("warning: --bunsetsu takes priority over -O/-F/--wakati output flags");
     }
 
@@ -453,7 +460,12 @@ mod tests {
             make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ", 3, 6),
             make_morpheme("本", "名詞,一般,*,*,*,*,本,ホン,ホン", 6, 9),
             make_morpheme("を", "助詞,格助詞,一般,*,*,*,を,ヲ,ヲ", 9, 12),
-            make_morpheme("読む", "動詞,自立,*,*,五段・マ行,基本形,読む,ヨム,ヨム", 12, 24),
+            make_morpheme(
+                "読む",
+                "動詞,自立,*,*,五段・マ行,基本形,読む,ヨム,ヨム",
+                12,
+                24,
+            ),
         ];
         let result = mecrab::AnalysisResult::new(morphemes, mecrab::OutputFormat::Default);
 

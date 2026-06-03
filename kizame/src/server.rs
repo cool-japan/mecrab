@@ -246,7 +246,10 @@ fn result_to_response_body(
 
 /// Serialize an `AnalysisResult` as a `serde_json::Value` matching the
 /// `ParseResponseBody` shape, minus the `time_us` field (used in N-best arrays).
-fn result_to_json_value(result: &mecrab::AnalysisResult, format: &ParseFormat) -> serde_json::Value {
+fn result_to_json_value(
+    result: &mecrab::AnalysisResult,
+    format: &ParseFormat,
+) -> serde_json::Value {
     match format {
         ParseFormat::Json => {
             let tokens: Vec<serde_json::Value> = result
@@ -313,10 +316,7 @@ async fn parse(
         });
 
         return Ok(Json(serde_json::Value::Object(
-            nbest_body
-                .as_object()
-                .cloned()
-                .unwrap_or_default(),
+            nbest_body.as_object().cloned().unwrap_or_default(),
         ))
         .into_response());
     }

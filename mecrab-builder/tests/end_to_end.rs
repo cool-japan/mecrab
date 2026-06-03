@@ -128,7 +128,9 @@ fn nbest_returns_paths_non_decreasing() {
 fn unknown_word_no_panic() {
     let m = make_mecrab();
     // グーグル is not in the lexicon → unknown-word handler must fire
-    let r = m.parse("グーグル").expect("parse must not fail for unknown word");
+    let r = m
+        .parse("グーグル")
+        .expect("parse must not fail for unknown word");
     let non_empty: Vec<&str> = r
         .morphemes
         .iter()
@@ -255,7 +257,10 @@ fn lattice_prob_table_structure_is_valid() {
     // best_per_position should pick the higher-prob node
     let best = table.best_per_position();
     assert_eq!(best.len(), 1);
-    assert_eq!(best[0].surface, "すもも", "best node should be the higher-prob one");
+    assert_eq!(
+        best[0].surface, "すもも",
+        "best node should be the higher-prob one"
+    );
 
     // all_nodes_sorted should be in descending prob order
     let sorted = table.all_nodes_sorted();
@@ -365,16 +370,20 @@ fn nfkc_normalized_input_segments() {
 #[test]
 fn hot_swap_preserves_overlay() {
     let d = build_synthetic_dictionary();
-    let mecrab =
-        mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
-            .expect("synthetic dict load failed");
+    let mecrab = mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("synthetic dict load failed");
 
     mecrab.add_word("テスト語", "テストゴ", "テストゴ", -500);
-    assert_eq!(mecrab.overlay_size(), 1, "overlay must have 1 entry before swap");
+    assert_eq!(
+        mecrab.overlay_size(),
+        1,
+        "overlay must have 1 entry before swap"
+    );
 
     // Build a fresh dictionary from the same byte buffers and hot-swap.
-    let dict2 = mecrab::dict::Dictionary::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
-        .expect("dict2 load failed");
+    let dict2 =
+        mecrab::dict::Dictionary::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+            .expect("dict2 load failed");
     mecrab.hot_swap(dict2);
 
     assert_eq!(
@@ -388,19 +397,25 @@ fn hot_swap_preserves_overlay() {
 #[test]
 fn hot_swap_parse_continues() {
     let d = build_synthetic_dictionary();
-    let mecrab =
-        mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
-            .expect("synthetic dict load failed");
+    let mecrab = mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("synthetic dict load failed");
 
     let r1 = mecrab.parse("すもも").expect("parse before swap failed");
-    assert!(!r1.morphemes.is_empty(), "must produce morphemes before swap");
+    assert!(
+        !r1.morphemes.is_empty(),
+        "must produce morphemes before swap"
+    );
 
-    let dict2 = mecrab::dict::Dictionary::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
-        .expect("dict2 load failed");
+    let dict2 =
+        mecrab::dict::Dictionary::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+            .expect("dict2 load failed");
     mecrab.hot_swap(dict2);
 
     let r2 = mecrab.parse("すもも").expect("parse after swap failed");
-    assert!(!r2.morphemes.is_empty(), "must produce morphemes after swap");
+    assert!(
+        !r2.morphemes.is_empty(),
+        "must produce morphemes after swap"
+    );
 }
 
 // ── Constrained / partial parsing tests ──────────────────────────────────────
@@ -415,11 +430,7 @@ fn test_constrained_empty_equals_plain() {
         .parse_with_constraints(text, &mecrab::ParseConstraints::new())
         .expect("constrained parse failed");
 
-    let plain_surfaces: Vec<&str> = plain
-        .morphemes
-        .iter()
-        .map(|m| m.surface.as_str())
-        .collect();
+    let plain_surfaces: Vec<&str> = plain.morphemes.iter().map(|m| m.surface.as_str()).collect();
     let constrained_surfaces: Vec<&str> = constrained
         .morphemes
         .iter()
@@ -472,8 +483,7 @@ fn test_constrained_forced_span_with_custom_feature() {
     let mecrab = make_mecrab();
     // Force bytes 0..9 ("すもも") to be a single token with a custom feature.
     let text = "すもももももももものうち";
-    let custom_feature =
-        "名詞,固有名詞,*,*,*,*,テスト,テスト,テスト".to_string();
+    let custom_feature = "名詞,固有名詞,*,*,*,*,テスト,テスト,テスト".to_string();
     let mut constraints = mecrab::ParseConstraints::new();
     constraints.add_span(0, 9, Some(custom_feature));
 

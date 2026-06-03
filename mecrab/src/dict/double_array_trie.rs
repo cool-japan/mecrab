@@ -62,11 +62,7 @@ struct TriePrefixCache {
 impl std::fmt::Debug for TriePrefixCache {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         // Count valid (non-INVALID) entries for a compact representation.
-        let valid_count = self
-            .table
-            .iter()
-            .filter(|&&v| v != Self::INVALID)
-            .count();
+        let valid_count = self.table.iter().filter(|&&v| v != Self::INVALID).count();
         f.debug_struct("TriePrefixCache")
             .field("table_len", &self.table.len())
             .field("valid_entries", &valid_count)
@@ -597,8 +593,7 @@ mod tests {
         // Parse only the trie portion out of the buf.
         // Header layout: see sys_dic.rs — HEADER_SIZE = 72 bytes.
         const HEADER_SIZE: usize = 72;
-        let da_size =
-            u32::from_le_bytes(buf[24..28].try_into().unwrap()) as usize;
+        let da_size = u32::from_le_bytes(buf[24..28].try_into().unwrap()) as usize;
         let mut trie =
             DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size).expect("trie parse failed");
         trie.build_prefix_cache();
@@ -686,8 +681,7 @@ mod tests {
             build_sysdic_bytes(&entries, 8, 8, "UTF-8", 0).expect("sysdic build failed");
 
         const HEADER_SIZE: usize = 72;
-        let da_size =
-            u32::from_le_bytes(buf[24..28].try_into().unwrap()) as usize;
+        let da_size = u32::from_le_bytes(buf[24..28].try_into().unwrap()) as usize;
 
         // Trie without cache (reference baseline)
         let trie_no_cache =
@@ -700,14 +694,14 @@ mod tests {
 
         // Test strings: known words, prefixes, no-match strings
         let test_keys: &[&[u8]] = &[
-            "すもも".as_bytes(),            // exact match
-            "すもももも".as_bytes(),          // prefix: すもも + もも
-            "もも".as_bytes(),              // exact match
-            "東京".as_bytes(),              // 3-byte kanji pair
-            "東京都".as_bytes(),             // prefix: 東京 + unknown suffix
-            "xyz".as_bytes(),              // no match (ASCII)
-            "す".as_bytes(),               // single hiragana char (3 bytes)
-            "すもも東京".as_bytes(),          // concatenation of two known entries
+            "すもも".as_bytes(),     // exact match
+            "すもももも".as_bytes(), // prefix: すもも + もも
+            "もも".as_bytes(),       // exact match
+            "東京".as_bytes(),       // 3-byte kanji pair
+            "東京都".as_bytes(),     // prefix: 東京 + unknown suffix
+            "xyz".as_bytes(),        // no match (ASCII)
+            "す".as_bytes(),         // single hiragana char (3 bytes)
+            "すもも東京".as_bytes(), // concatenation of two known entries
         ];
 
         let mut ref_results = [DartsResult::default(); 64];
@@ -718,7 +712,8 @@ mod tests {
             let cached_count = trie_cached.common_prefix_search(key, &mut cached_results);
 
             assert_eq!(
-                ref_count, cached_count,
+                ref_count,
+                cached_count,
                 "result count mismatch for key {:?}: ref={}, cached={}",
                 std::str::from_utf8(key).unwrap_or("<invalid utf8>"),
                 ref_count,
@@ -727,7 +722,8 @@ mod tests {
 
             for i in 0..ref_count {
                 assert_eq!(
-                    ref_results[i].value, cached_results[i].value,
+                    ref_results[i].value,
+                    cached_results[i].value,
                     "value mismatch at result[{}] for key {:?}: ref={}, cached={}",
                     i,
                     std::str::from_utf8(key).unwrap_or("<invalid utf8>"),
@@ -735,7 +731,8 @@ mod tests {
                     cached_results[i].value
                 );
                 assert_eq!(
-                    ref_results[i].length, cached_results[i].length,
+                    ref_results[i].length,
+                    cached_results[i].length,
                     "length mismatch at result[{}] for key {:?}: ref={}, cached={}",
                     i,
                     std::str::from_utf8(key).unwrap_or("<invalid utf8>"),

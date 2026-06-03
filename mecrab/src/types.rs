@@ -211,12 +211,10 @@ mod tests {
     }
 
     /// Standard IPADIC feature string for 東京 (proper noun, place).
-    const TOKYO_FEATURE: &str =
-        "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ";
+    const TOKYO_FEATURE: &str = "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ";
 
     /// Standard IPADIC feature string for 読んで (verb in gerund form).
-    const YONDE_FEATURE: &str =
-        "動詞,自立,*,*,五段・マ行,連用タ接続,読む,ヨンデ,ヨンデ";
+    const YONDE_FEATURE: &str = "動詞,自立,*,*,五段・マ行,連用タ接続,読む,ヨンデ,ヨンデ";
 
     #[test]
     fn test_pos_returns_first_field() {

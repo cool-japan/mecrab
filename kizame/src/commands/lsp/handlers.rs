@@ -3,18 +3,17 @@
 //! Copyright 2026 COOLJAPAN OU (Team KitaSan)
 
 use super::server::{
-    extract_prefix_at, parse_ipadic_features, pos_to_completion_kind, MeCrabLanguageServer,
-};
-use tower_lsp::jsonrpc::Result as LspResult;
-use tower_lsp::lsp_types::{
-    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse,
-    DiagnosticOptions, DiagnosticServerCapabilities, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, Hover, HoverContents, HoverParams, HoverProviderCapability,
-    InitializeParams, InitializeResult, InitializedParams, MarkupContent, MarkupKind,
-    MessageType, ServerCapabilities, TextDocumentSyncCapability, TextDocumentSyncKind,
-    WorkDoneProgressOptions,
+    MeCrabLanguageServer, extract_prefix_at, parse_ipadic_features, pos_to_completion_kind,
 };
 use tower_lsp::LanguageServer;
+use tower_lsp::jsonrpc::Result as LspResult;
+use tower_lsp::lsp_types::{
+    CompletionItem, CompletionOptions, CompletionParams, CompletionResponse, DiagnosticOptions,
+    DiagnosticServerCapabilities, DidChangeTextDocumentParams, DidOpenTextDocumentParams, Hover,
+    HoverContents, HoverParams, HoverProviderCapability, InitializeParams, InitializeResult,
+    InitializedParams, MarkupContent, MarkupKind, MessageType, ServerCapabilities,
+    TextDocumentSyncCapability, TextDocumentSyncKind, WorkDoneProgressOptions,
+};
 
 #[tower_lsp::async_trait]
 impl LanguageServer for MeCrabLanguageServer {

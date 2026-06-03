@@ -297,9 +297,8 @@ impl VectorStore {
             VectorDataType::F32 => self.get(word_id).map(std::borrow::Cow::Borrowed),
             VectorDataType::F16 => {
                 let start = idx * self.dim * 2;
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(self.data_ptr.add(start), self.dim * 2)
-                };
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(self.data_ptr.add(start), self.dim * 2) };
                 let u16s: &[u16] = bytemuck::cast_slice(bytes);
                 Some(std::borrow::Cow::Owned(
                     u16s.iter().map(|&b| f16_to_f32(b)).collect(),
@@ -307,9 +306,8 @@ impl VectorStore {
             }
             VectorDataType::I8 => {
                 let start = idx * self.dim;
-                let bytes = unsafe {
-                    std::slice::from_raw_parts(self.data_ptr.add(start), self.dim)
-                };
+                let bytes =
+                    unsafe { std::slice::from_raw_parts(self.data_ptr.add(start), self.dim) };
                 let i8s: &[i8] = bytemuck::cast_slice(bytes);
                 let scale = self.quant_scale.unwrap_or(1.0_f32);
                 Some(std::borrow::Cow::Owned(
@@ -584,7 +582,11 @@ pub fn quantize_i8(vectors: &[f32], vocab_size: usize, dim: usize) -> (Vec<u8>, 
     use bytemuck::bytes_of;
     assert_eq!(vectors.len(), vocab_size * dim, "vectors length mismatch");
     let max_abs = vectors.iter().copied().fold(0.0_f32, |m, v| m.max(v.abs()));
-    let scale = if max_abs > 0.0 { max_abs / 127.0 } else { 1.0_f32 };
+    let scale = if max_abs > 0.0 {
+        max_abs / 127.0
+    } else {
+        1.0_f32
+    };
     let inv = 1.0 / scale;
     let total = 32 + vocab_size * dim;
     let mut buf = Vec::with_capacity(total);

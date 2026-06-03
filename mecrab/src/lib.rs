@@ -94,8 +94,7 @@ pub use types::{AnalysisResult, Morpheme, OutputFormat};
 pub use viterbi::analysis::TextScore;
 pub use viterbi::train::{CrfGradient, GoldMorpheme, GoldSegmentation, TrainStepSummary};
 pub use viterbi::train_loop::{
-    DictTrainConfig, DictTrainSummary, EpochStats, TrainingMatrix,
-    boundary_f1,
+    DictTrainConfig, DictTrainSummary, EpochStats, TrainingMatrix, boundary_f1,
 };
 
 #[cfg(feature = "neural")]
@@ -1024,7 +1023,10 @@ mod tests {
         use mecrab_builder::build_synthetic_dictionary;
         let sd1 = build_synthetic_dictionary();
         let dict1 = crate::dict::Dictionary::from_bytes(
-            &sd1.sys_dic, &sd1.matrix, &sd1.char_def, &sd1.unk_def,
+            &sd1.sys_dic,
+            &sd1.matrix,
+            &sd1.char_def,
+            &sd1.unk_def,
         )
         .expect("dict1 load");
         let mecrab = MeCrab::from_dictionary(dict1);
@@ -1033,7 +1035,10 @@ mod tests {
 
         let sd2 = build_synthetic_dictionary();
         let dict2 = crate::dict::Dictionary::from_bytes(
-            &sd2.sys_dic, &sd2.matrix, &sd2.char_def, &sd2.unk_def,
+            &sd2.sys_dic,
+            &sd2.matrix,
+            &sd2.char_def,
+            &sd2.unk_def,
         )
         .expect("dict2 load");
         mecrab.hot_swap(dict2);
@@ -1047,7 +1052,10 @@ mod tests {
         use mecrab_builder::build_synthetic_dictionary;
         let sd1 = build_synthetic_dictionary();
         let dict1 = crate::dict::Dictionary::from_bytes(
-            &sd1.sys_dic, &sd1.matrix, &sd1.char_def, &sd1.unk_def,
+            &sd1.sys_dic,
+            &sd1.matrix,
+            &sd1.char_def,
+            &sd1.unk_def,
         )
         .expect("dict1 load");
         let mecrab = MeCrab::from_dictionary(dict1);
@@ -1056,7 +1064,10 @@ mod tests {
 
         let sd2 = build_synthetic_dictionary();
         let dict2 = crate::dict::Dictionary::from_bytes(
-            &sd2.sys_dic, &sd2.matrix, &sd2.char_def, &sd2.unk_def,
+            &sd2.sys_dic,
+            &sd2.matrix,
+            &sd2.char_def,
+            &sd2.unk_def,
         )
         .expect("dict2 load");
         mecrab.hot_swap(dict2);

@@ -146,7 +146,11 @@ mod tests {
         let ranges: Vec<CharRange> = Vec::new();
         let bytes = build_char_bytes(&cats, &ranges).unwrap();
         let expected = 4 + 3 * 32 + CHARINFO_TABLE_SIZE * 4;
-        assert_eq!(bytes.len(), expected, "char.bin must be exactly {expected} bytes");
+        assert_eq!(
+            bytes.len(),
+            expected,
+            "char.bin must be exactly {expected} bytes"
+        );
     }
 
     #[test]
@@ -175,7 +179,7 @@ mod tests {
         // offset into table = 4 + 7*32 + 0x3042 * 4
         let table_start = 4 + cats.len() * 32;
         let idx = table_start + 0x3042 * 4;
-        let info = u32::from_le_bytes([bytes[idx], bytes[idx+1], bytes[idx+2], bytes[idx+3]]);
+        let info = u32::from_le_bytes([bytes[idx], bytes[idx + 1], bytes[idx + 2], bytes[idx + 3]]);
         assert_eq!(info, hiragana_info, "'あ' CharInfo should match Hiragana");
         // group bit must be set
         assert_eq!((info >> 30) & 1, 1, "group bit must be set for Hiragana");

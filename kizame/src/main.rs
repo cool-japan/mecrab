@@ -25,8 +25,8 @@ use commands::lsp::LspArgs;
 #[cfg(feature = "server")]
 use commands::serve::ServeArgs;
 use commands::{
-    dict::DictCommands, explore::ExploreArgs, parse::ParseArgs, score::ScoreArgs,
-    train::TrainArgs, vectors::VectorsCommands,
+    dict::DictCommands, explore::ExploreArgs, parse::ParseArgs, score::ScoreArgs, train::TrainArgs,
+    vectors::VectorsCommands,
 };
 #[cfg(feature = "full")]
 use std::path::PathBuf;

@@ -11,13 +11,13 @@ use std::path::Path;
 
 use byteorder::{LittleEndian, WriteBytesExt};
 
-use crate::{Error, Result};
 use crate::dict::{ConnectionMatrix, Dictionary};
 use crate::lattice::Lattice;
 use crate::viterbi::train::{
-    CrfGradient, GoldSegmentation, TrainStepSummary,
-    accumulate_batch_gradient, apply_conn_gradient_update, apply_word_gradient_update,
+    CrfGradient, GoldSegmentation, TrainStepSummary, accumulate_batch_gradient,
+    apply_conn_gradient_update, apply_word_gradient_update,
 };
+use crate::{Error, Result};
 
 // ── TrainingMatrix ────────────────────────────────────────────────────────────
 
@@ -92,7 +92,11 @@ impl TrainingMatrix {
             .filter_map(|(&wid, &delta)| {
                 let rounded = delta.round() as i64;
                 let clamped = rounded.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
-                if clamped != 0 { Some((wid, clamped)) } else { None }
+                if clamped != 0 {
+                    Some((wid, clamped))
+                } else {
+                    None
+                }
             })
             .collect()
     }
@@ -110,8 +114,7 @@ impl TrainingMatrix {
         let mut pairs: Vec<(u32, i16)> = deltas.into_iter().collect();
         pairs.sort_by_key(|&(wid, _)| wid);
         for (wid, delta) in pairs {
-            writeln!(w, "{wid}\t{delta}")
-                .map_err(|e| Error::IoError(format!("{e}")))?;
+            writeln!(w, "{wid}\t{delta}").map_err(|e| Error::IoError(format!("{e}")))?;
         }
         w.flush().map_err(|e| Error::IoError(format!("{e}")))?;
         Ok(())
@@ -386,10 +389,7 @@ fn apply_l2(gradient: &mut CrfGradient, matrix: &TrainingMatrix, l2_strength: f6
 /// For a sentence segmented as "東京" + "は", the end positions are
 /// {6, 9} (byte offsets).  A predicted boundary at offset 6 is a true positive
 /// if the gold also has an end at offset 6.
-pub fn boundary_f1(
-    predicted_ends: &[usize],
-    gold: &GoldSegmentation,
-) -> (f64, f64, f64) {
+pub fn boundary_f1(predicted_ends: &[usize], gold: &GoldSegmentation) -> (f64, f64, f64) {
     use std::collections::HashSet;
 
     let gold_ends: HashSet<usize> = gold
@@ -404,8 +404,16 @@ pub fn boundary_f1(
     let pred_ends: HashSet<usize> = predicted_ends.iter().copied().collect();
 
     let tp = pred_ends.intersection(&gold_ends).count() as f64;
-    let prec = if pred_ends.is_empty() { 0.0 } else { tp / pred_ends.len() as f64 };
-    let rec = if gold_ends.is_empty() { 0.0 } else { tp / gold_ends.len() as f64 };
+    let prec = if pred_ends.is_empty() {
+        0.0
+    } else {
+        tp / pred_ends.len() as f64
+    };
+    let rec = if gold_ends.is_empty() {
+        0.0
+    } else {
+        tp / gold_ends.len() as f64
+    };
     let f1 = if prec + rec == 0.0 {
         0.0
     } else {
@@ -430,18 +438,18 @@ pub fn read_word_costs<P: AsRef<Path>>(path: P) -> Result<HashMap<u32, i16>> {
             continue;
         }
         let mut parts = trimmed.splitn(2, '\t');
-        let wid_str = parts.next().ok_or_else(|| {
-            Error::IoError(format!("line {}: missing word_id", line_no + 1))
-        })?;
-        let delta_str = parts.next().ok_or_else(|| {
-            Error::IoError(format!("line {}: missing delta", line_no + 1))
-        })?;
-        let word_id: u32 = wid_str.parse().map_err(|e| {
-            Error::IoError(format!("line {}: invalid word_id: {e}", line_no + 1))
-        })?;
-        let delta: i16 = delta_str.parse().map_err(|e| {
-            Error::IoError(format!("line {}: invalid delta: {e}", line_no + 1))
-        })?;
+        let wid_str = parts
+            .next()
+            .ok_or_else(|| Error::IoError(format!("line {}: missing word_id", line_no + 1)))?;
+        let delta_str = parts
+            .next()
+            .ok_or_else(|| Error::IoError(format!("line {}: missing delta", line_no + 1)))?;
+        let word_id: u32 = wid_str
+            .parse()
+            .map_err(|e| Error::IoError(format!("line {}: invalid word_id: {e}", line_no + 1)))?;
+        let delta: i16 = delta_str
+            .parse()
+            .map_err(|e| Error::IoError(format!("line {}: invalid delta: {e}", line_no + 1)))?;
         map.insert(word_id, delta);
     }
     Ok(map)
@@ -458,7 +466,12 @@ mod tests {
     /// Build a tiny TrainingMatrix directly from data for testing.
     fn tiny_matrix(lsize: usize, rsize: usize) -> TrainingMatrix {
         let data = vec![10i16; lsize * rsize];
-        TrainingMatrix { data, lsize, rsize, word_cost_deltas: HashMap::new() }
+        TrainingMatrix {
+            data,
+            lsize,
+            rsize,
+            word_cost_deltas: HashMap::new(),
+        }
     }
 
     // ── Existing matrix tests ─────────────────────────────────────────────────
@@ -517,7 +530,13 @@ mod tests {
 
     #[test]
     fn test_epoch_stats_fields() {
-        let s = EpochStats { epoch: 2, loss: 1.5, sentences: 10, tokens: 50, effective_lr: 0.01 };
+        let s = EpochStats {
+            epoch: 2,
+            loss: 1.5,
+            sentences: 10,
+            tokens: 50,
+            effective_lr: 0.01,
+        };
         assert_eq!(s.epoch, 2);
         assert!((s.loss - 1.5).abs() < 1e-9);
         assert_eq!(s.sentences, 10);
@@ -575,10 +594,19 @@ mod tests {
         let lr0 = compute_effective_lr(&config, 0);
         let lr4 = compute_effective_lr(&config, 4);
         let lr2 = compute_effective_lr(&config, 2);
-        assert!((lr0 - 0.1).abs() < 1e-9, "epoch 0 lr should be 0.1, got {lr0}");
-        assert!((lr4 - 0.001).abs() < 1e-9, "epoch 4 lr should be 0.001, got {lr4}");
+        assert!(
+            (lr0 - 0.1).abs() < 1e-9,
+            "epoch 0 lr should be 0.1, got {lr0}"
+        );
+        assert!(
+            (lr4 - 0.001).abs() < 1e-9,
+            "epoch 4 lr should be 0.001, got {lr4}"
+        );
         // Monotonically decreasing
-        assert!(lr0 > lr2 && lr2 > lr4, "LR should be monotonically decreasing");
+        assert!(
+            lr0 > lr2 && lr2 > lr4,
+            "LR should be monotonically decreasing"
+        );
         // No decay when min_learning_rate == 0.0
         let config_nodecay = DictTrainConfig {
             learning_rate: 0.1,
@@ -595,8 +623,8 @@ mod tests {
     fn test_word_cost_deltas_i16() {
         let mut m = tiny_matrix(2, 2);
         let mut grad = CrfGradient::new();
-        grad.add_word(42, 5.0);   // delta -= lr * 5.0 = -0.1 * 5 = -0.5
-        grad.add_word(99, -3.0);  // delta -= lr * -3.0 = +0.3
+        grad.add_word(42, 5.0); // delta -= lr * 5.0 = -0.1 * 5 = -0.5
+        grad.add_word(99, -3.0); // delta -= lr * -3.0 = +0.3
         m.apply_word_gradient(&grad, 0.1);
 
         // Deltas: 42 → -0.5, 99 → +0.3
@@ -604,8 +632,8 @@ mod tests {
         // Reset and use lr=10 to get nonzero rounded deltas
         m.word_cost_deltas.clear();
         let mut grad2 = CrfGradient::new();
-        grad2.add_word(42, 5.0);   // delta = -10 * 5 = -50
-        grad2.add_word(99, -3.0);  // delta = -10 * -3 = +30
+        grad2.add_word(42, 5.0); // delta = -10 * 5 = -50
+        grad2.add_word(99, -3.0); // delta = -10 * -3 = +30
         m.apply_word_gradient(&grad2, 10.0);
 
         let deltas_i16 = m.word_cost_deltas_i16();
@@ -639,8 +667,8 @@ mod tests {
         let mut m = tiny_matrix(2, 2);
         // Apply large gradient to get nonzero i16 deltas
         let mut grad = CrfGradient::new();
-        grad.add_word(7, 2.0);    // delta = -100 * 2 = -200
-        grad.add_word(13, -4.0);  // delta = -100 * -4 = +400
+        grad.add_word(7, 2.0); // delta = -100 * 2 = -200
+        grad.add_word(13, -4.0); // delta = -100 * -4 = +400
         m.apply_word_gradient(&grad, 100.0);
 
         let path = temp_dir().join("mecrab_test_word_costs.tsv");

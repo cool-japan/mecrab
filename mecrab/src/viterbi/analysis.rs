@@ -467,15 +467,8 @@ impl LatticeProbTable {
             .iter()
             .map(|nodes| {
                 // p_max at this position
-                let p_max = nodes
-                    .iter()
-                    .map(|n| n.prob)
-                    .fold(0.0_f64, f64::max);
-                if p_max <= 0.0 {
-                    0.0
-                } else {
-                    -p_max.ln()
-                }
+                let p_max = nodes.iter().map(|n| n.prob).fold(0.0_f64, f64::max);
+                if p_max <= 0.0 { 0.0 } else { -p_max.ln() }
             })
             .sum();
 

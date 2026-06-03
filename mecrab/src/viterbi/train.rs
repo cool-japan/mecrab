@@ -21,8 +21,8 @@ use std::collections::HashMap;
 
 use crate::dict::Dictionary;
 use crate::lattice::Lattice;
-use crate::viterbi::analysis::LatticeProbTable;
 use crate::viterbi::ViterbiSolver;
+use crate::viterbi::analysis::LatticeProbTable;
 
 // ── Gold segmentation types ───────────────────────────────────────────────────
 
@@ -136,7 +136,10 @@ impl CrfGradient {
 
     /// Add a gradient contribution for a connection (right_id → left_id).
     pub fn add_conn(&mut self, right_id: u16, left_id: u16, delta: f64) {
-        *self.conn_gradients.entry((right_id, left_id)).or_insert(0.0) += delta;
+        *self
+            .conn_gradients
+            .entry((right_id, left_id))
+            .or_insert(0.0) += delta;
     }
 
     /// Add a gradient contribution for a word cost.
@@ -309,9 +312,7 @@ pub fn compute_sentence_gradient(
             }
             let key = (node.start, node.end, node.surface.to_string());
             if let Some(&marginal) = expected_word_by_surface.get(&key) {
-                *expected_word_by_id
-                    .entry(node.word_id)
-                    .or_insert(0.0) += marginal;
+                *expected_word_by_id.entry(node.word_id).or_insert(0.0) += marginal;
             }
         }
     }
@@ -512,8 +513,7 @@ pub(super) fn edge_expected_counts_from_fb(
                     if alpha_i == f64::NEG_INFINITY {
                         continue;
                     }
-                    let conn =
-                        dict.connection_cost(prev_node.right_id, node.left_id) as f64;
+                    let conn = dict.connection_cost(prev_node.right_id, node.left_id) as f64;
                     let arc_contrib = -conn / TEMPERATURE;
                     let log_edge_prob = alpha_i + arc_contrib + wcost_contrib + beta_j - log_z;
                     let edge_prob = log_edge_prob.exp().clamp(0.0, 1.0);
@@ -535,8 +535,7 @@ pub(super) fn edge_expected_counts_from_fb(
                     if alpha_i == f64::NEG_INFINITY {
                         continue;
                     }
-                    let conn =
-                        dict.connection_cost(prev_node.right_id, node.left_id) as f64;
+                    let conn = dict.connection_cost(prev_node.right_id, node.left_id) as f64;
                     let arc_contrib = -conn / TEMPERATURE;
                     let log_edge_prob = alpha_i + arc_contrib + wcost_contrib + beta_j - log_z;
                     let edge_prob = log_edge_prob.exp().clamp(0.0, 1.0);

@@ -66,13 +66,7 @@ pub fn build_matrix_bytes(lsize: u16, rsize: u16, costs: &[i16]) -> Result<Vec<u
 /// # Panics
 ///
 /// Panics if `right_id + lsize * left_id >= costs.len()`.
-pub fn set_cost(
-    costs: &mut [i16],
-    lsize: usize,
-    right_id: usize,
-    left_id: usize,
-    value: i16,
-) {
+pub fn set_cost(costs: &mut [i16], lsize: usize, right_id: usize, left_id: usize, value: i16) {
     costs[right_id + lsize * left_id] = value;
 }
 
@@ -132,10 +126,10 @@ mod tests {
         let lsize: u16 = 8;
         let rsize: u16 = 8;
         let mut costs = vec![1000i16; 64];
-        set_cost(&mut costs, 8, 0, 1, 0);    // BOS → noun
-        set_cost(&mut costs, 8, 1, 0, 0);    // noun → EOS
-        set_cost(&mut costs, 8, 1, 2, 0);    // noun → particle
-        set_cost(&mut costs, 8, 2, 1, 0);    // particle → noun
+        set_cost(&mut costs, 8, 0, 1, 0); // BOS → noun
+        set_cost(&mut costs, 8, 1, 0, 0); // noun → EOS
+        set_cost(&mut costs, 8, 1, 2, 0); // noun → particle
+        set_cost(&mut costs, 8, 2, 1, 0); // particle → noun
         let bytes = build_matrix_bytes(lsize, rsize, &costs).unwrap();
 
         // Verify size

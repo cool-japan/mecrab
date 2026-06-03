@@ -421,28 +421,19 @@ fn expand_template(template: &str, morpheme: &crate::Morpheme, out: &mut String)
                         if i + 2 < len && bytes[i + 2] == b'[' {
                             // Find the closing `]`.
                             let bracket_start = i + 3;
-                            match bytes[bracket_start..]
-                                .iter()
-                                .position(|&b| b == b']')
-                            {
+                            match bytes[bracket_start..].iter().position(|&b| b == b']') {
                                 Some(bracket_len) => {
-                                    let digit_bytes = &bytes[bracket_start
-                                        ..bracket_start + bracket_len];
+                                    let digit_bytes =
+                                        &bytes[bracket_start..bracket_start + bracket_len];
                                     // Parse the field index (ASCII digits only).
                                     let n_opt = std::str::from_utf8(digit_bytes)
                                         .ok()
                                         .and_then(|s| s.parse::<usize>().ok());
                                     let field_val = n_opt.and_then(|n| {
                                         let v = morpheme.feature.split(',').nth(n)?;
-                                        if v == "*" {
-                                            None
-                                        } else {
-                                            Some(v.to_owned())
-                                        }
+                                        if v == "*" { None } else { Some(v.to_owned()) }
                                     });
-                                    out.push_str(
-                                        field_val.as_deref().unwrap_or("*"),
-                                    );
+                                    out.push_str(field_val.as_deref().unwrap_or("*"));
                                     // Advance past `%f[n]`
                                     i = bracket_start + bracket_len + 1;
                                 }
@@ -485,16 +476,12 @@ fn expand_template(template: &str, morpheme: &crate::Morpheme, out: &mut String)
                                 if i + 3 < len {
                                     match bytes[i + 3] {
                                         b'l' => {
-                                            out.push_str(
-                                                &(morpheme.pos_id as u32).to_string(),
-                                            );
+                                            out.push_str(&(morpheme.pos_id as u32).to_string());
                                             i += 4;
                                         }
                                         b'r' => {
                                             // Right-context id: same value for IPADIC.
-                                            out.push_str(
-                                                &(morpheme.pos_id as u32).to_string(),
-                                            );
+                                            out.push_str(&(morpheme.pos_id as u32).to_string());
                                             i += 4;
                                         }
                                         _ => {
@@ -1014,7 +1001,9 @@ pub fn format_lattice_prob_with_positions(
 
 #[cfg(test)]
 mod tests {
-    use super::{compute_heuristic_deps, expand_template, ipadic_to_feats, ipadic_to_upos, ipadic_xpos};
+    use super::{
+        compute_heuristic_deps, expand_template, ipadic_to_feats, ipadic_to_upos, ipadic_xpos,
+    };
     use crate::{AnalysisResult, Morpheme, OutputFormat};
 
     fn make_morpheme(surface: &str, feature: &str) -> Morpheme {
@@ -1215,7 +1204,10 @@ mod tests {
             make_morpheme("を", "助詞,格助詞,一般,*,*,*,を,ヲ,ヲ"),
             make_morpheme("公園", "名詞,一般,*,*,*,*,公園,コウエン,コウエン"),
             make_morpheme("で", "助詞,格助詞,一般,*,*,*,で,デ,デ"),
-            make_morpheme("会っ", "動詞,自立,*,*,五段・ワ行促音便,連用タ接続,会う,アッ,アッ"),
+            make_morpheme(
+                "会っ",
+                "動詞,自立,*,*,五段・ワ行促音便,連用タ接続,会う,アッ,アッ",
+            ),
             make_morpheme("た", "助動詞,*,*,*,特殊・タ,基本形,た,タ,タ"),
         ];
         let result = AnalysisResult {
@@ -1275,8 +1267,7 @@ mod tests {
             .filter(|l| !l.starts_with('#') && !l.is_empty())
             .count();
         assert_eq!(
-            token_line_count,
-            8,
+            token_line_count, 8,
             "expected 8 token lines, got {}",
             token_line_count
         );
@@ -1318,7 +1309,10 @@ mod tests {
     fn test_template_surface_and_feature_field() {
         // `%m,%f[0]\n` must produce one "surface,pos\n" line per morpheme.
         let morphemes = vec![
-            make_morpheme("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ"),
+            make_morpheme(
+                "東京",
+                "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+            ),
             make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ"),
         ];
         let result = make_result(morphemes);
@@ -1457,7 +1451,10 @@ mod tests {
     fn test_template_two_morphemes_produces_two_lines() {
         // A two-morpheme result with `%m\n` must yield two newline-terminated lines.
         let morphemes = vec![
-            make_morpheme("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ"),
+            make_morpheme(
+                "東京",
+                "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+            ),
             make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ"),
         ];
         let result = make_result(morphemes);

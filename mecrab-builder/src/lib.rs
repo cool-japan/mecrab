@@ -9,26 +9,26 @@
 //! - A synthetic in-memory dictionary for testing and WASM use cases
 
 pub mod char_writer;
+mod csv_export;
+mod dbpedia;
+mod entity_resolver;
 pub mod matrix_writer;
 pub mod ontology;
 pub mod synthetic;
 pub mod sysdic_writer;
-mod csv_export;
-mod dbpedia;
-mod entity_resolver;
 mod wikidata;
 mod wikipedia;
 
-pub use char_writer::{build_char_bytes, pack_char_info, CharRange, CHARINFO_TABLE_SIZE};
+pub use char_writer::{CHARINFO_TABLE_SIZE, CharRange, build_char_bytes, pack_char_info};
 pub use csv_export::{CsvExportConfig, CsvExportStats, export_csv_with_uris, export_index_as_csv};
 pub use dbpedia::{DBpediaProcessor, DBpediaStats};
 pub use entity_resolver::{EntityResolver, ResolvedEntity};
 pub use matrix_writer::{build_matrix_bytes, set_cost, write_matrix};
 pub use ontology::{OntologyEntry, OntologyFormat, OntologyStats, import_ontology};
+pub use synthetic::{SyntheticDictionary, build_synthetic_dictionary};
 pub use sysdic_writer::{
-    build_sysdic_bytes, build_unkdic_bytes, write_sysdic, DicEntry, WriteSysDicStats,
+    DicEntry, WriteSysDicStats, build_sysdic_bytes, build_unkdic_bytes, write_sysdic,
 };
-pub use synthetic::{build_synthetic_dictionary, SyntheticDictionary};
 pub use wikidata::{
     BuildConfig, BuildProgress, BuildResult, WikidataEntry, WikidataIndex, WikidataProcessor,
 };

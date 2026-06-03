@@ -326,8 +326,7 @@ impl Trainer {
                                 }
                                 TrainingObjective::Cbow => {
                                     // Collect all valid context word IDs in the window
-                                    let mut context_ids: Vec<u32> =
-                                        Vec::with_capacity(2 * window);
+                                    let mut context_ids: Vec<u32> = Vec::with_capacity(2 * window);
                                     for offset in 1..=window {
                                         if pos >= offset {
                                             let ctx = sentence[pos - offset];
@@ -880,7 +879,10 @@ impl Trainer {
         let vocab_size = self.vocab.len();
         let vector_size = self.config.vector_size;
 
-        eprintln!("GPU training — vocab_size={} vector_size={}", vocab_size, vector_size);
+        eprintln!(
+            "GPU training — vocab_size={} vector_size={}",
+            vocab_size, vector_size
+        );
 
         let sentences = self.load_corpus()?;
         let total_sentences = sentences.len();
@@ -903,13 +905,20 @@ impl Trainer {
                 - (self.config.alpha - self.config.min_alpha)
                     * (epoch_start as f32 / total_words_all_epochs as f32);
 
-            eprintln!("Epoch {}/{} — alpha={:.6}", epoch + 1, self.config.epochs, alpha);
+            eprintln!(
+                "Epoch {}/{} — alpha={:.6}",
+                epoch + 1,
+                self.config.epochs,
+                alpha
+            );
 
             let mut rng = rand::rng();
             let mut batch: Vec<TrainingPair> = Vec::with_capacity(16384);
 
             for sentence in &sentences {
-                if sentence.is_empty() { continue; }
+                if sentence.is_empty() {
+                    continue;
+                }
                 for (pos, &center_id) in sentence.iter().enumerate() {
                     let center_remapped = match self.vocab.get_remapped_id(center_id) {
                         Some(id) => id,
@@ -919,7 +928,11 @@ impl Trainer {
                     for offset in 1..=window {
                         let neighbors = [
                             pos.checked_sub(offset).map(|i| sentence[i]),
-                            if pos + offset < sentence.len() { Some(sentence[pos + offset]) } else { None },
+                            if pos + offset < sentence.len() {
+                                Some(sentence[pos + offset])
+                            } else {
+                                None
+                            },
                         ];
                         for ctx_id in neighbors.iter().flatten() {
                             let ctx_remapped = match self.vocab.get_remapped_id(*ctx_id) {
@@ -927,12 +940,22 @@ impl Trainer {
                                 None => continue,
                             };
                             // Positive pair
-                            batch.push(TrainingPair { center: center_remapped, context: ctx_remapped, label: 1, _pad: 0 });
+                            batch.push(TrainingPair {
+                                center: center_remapped,
+                                context: ctx_remapped,
+                                label: 1,
+                                _pad: 0,
+                            });
                             // Negative samples
                             for _ in 0..self.config.negative_samples {
                                 let neg = skipgram.sample_negative(&mut rng);
                                 if neg != ctx_remapped {
-                                    batch.push(TrainingPair { center: center_remapped, context: neg, label: 0, _pad: 0 });
+                                    batch.push(TrainingPair {
+                                        center: center_remapped,
+                                        context: neg,
+                                        label: 0,
+                                        _pad: 0,
+                                    });
                                 }
                             }
                             // Dispatch when batch is large enough
@@ -948,7 +971,11 @@ impl Trainer {
                 gpu_trainer.train_batch(&batch, alpha);
                 batch.clear();
             }
-            eprintln!("  Epoch {} done — processed {} sentences", epoch + 1, total_sentences);
+            eprintln!(
+                "  Epoch {} done — processed {} sentences",
+                epoch + 1,
+                total_sentences
+            );
         }
 
         gpu_trainer.read_back(syn0, syn1neg);
@@ -1036,7 +1063,10 @@ mod tests {
         let initial: Vec<f32> = (0..array_size)
             .map(|i| ((i as f32 * 1.234).sin()) / vector_size as f32)
             .collect();
-        let any_changed = syn0.iter().zip(initial.iter()).any(|(a, b)| (a - b).abs() > 1e-9);
+        let any_changed = syn0
+            .iter()
+            .zip(initial.iter())
+            .any(|(a, b)| (a - b).abs() > 1e-9);
         assert!(any_changed, "training must update at least one weight");
 
         let _ = std::fs::remove_file(&corpus_path);
@@ -1067,11 +1097,17 @@ mod tests {
 
         // All syn0 embeddings must be finite
         for (i, &v) in model.syn0.iter().enumerate() {
-            assert!(v.is_finite(), "syn0[{i}] must be finite after training, got {v}");
+            assert!(
+                v.is_finite(),
+                "syn0[{i}] must be finite after training, got {v}"
+            );
         }
         // At least one embedding must be non-zero (training must change something)
         let any_nonzero = model.syn0.iter().any(|&v| v != 0.0);
-        assert!(any_nonzero, "syn0 must have at least one non-zero value after training");
+        assert!(
+            any_nonzero,
+            "syn0 must have at least one non-zero value after training"
+        );
 
         let _ = std::fs::remove_file(&corpus_path);
     }

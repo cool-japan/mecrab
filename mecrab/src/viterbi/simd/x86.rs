@@ -20,7 +20,10 @@ pub mod x86_impl {
     #[inline]
     #[allow(dead_code)]
     fn scalar_min_forward(costs: &[i32]) -> (usize, i32) {
-        debug_assert!(!costs.is_empty(), "scalar_min_forward called with empty slice");
+        debug_assert!(
+            !costs.is_empty(),
+            "scalar_min_forward called with empty slice"
+        );
         let mut best_idx = 0usize;
         let mut best_val = costs[0];
         for (i, &c) in costs.iter().enumerate().skip(1) {
@@ -35,7 +38,11 @@ pub mod x86_impl {
     #[inline]
     #[allow(dead_code)]
     fn scalar_min_from(costs: &[i32]) -> Option<(usize, i32)> {
-        if costs.is_empty() { None } else { Some(scalar_min_forward(costs)) }
+        if costs.is_empty() {
+            None
+        } else {
+            Some(scalar_min_forward(costs))
+        }
     }
 
     #[inline]
@@ -59,8 +66,8 @@ pub mod x86_impl {
     #[target_feature(enable = "avx2")]
     pub(super) unsafe fn find_min_avx2(costs: &[i32]) -> (usize, i32) {
         use core::arch::x86_64::{
-            _mm256_castsi256_si128, _mm256_extracti128_si256, _mm256_loadu_si256,
-            _mm256_min_epi32, _mm_extract_epi32, _mm_min_epi32, _mm_shuffle_epi32,
+            _mm_extract_epi32, _mm_min_epi32, _mm_shuffle_epi32, _mm256_castsi256_si128,
+            _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_min_epi32,
         };
 
         let len = costs.len();
@@ -101,7 +108,11 @@ pub mod x86_impl {
         };
 
         let global_min = avx_min.min(rem_val);
-        if rem_val < avx_min { (rem_idx, rem_val) } else { find_index_of(&costs[..covered], global_min) }
+        if rem_val < avx_min {
+            (rem_idx, rem_val)
+        } else {
+            find_index_of(&costs[..covered], global_min)
+        }
     }
 
     /// Find best predecessor using AVX2: argmin(prev_costs[i] + conn_costs[i]).
@@ -115,13 +126,15 @@ pub mod x86_impl {
         conn_costs: &[i16],
     ) -> Option<(usize, i32)> {
         use core::arch::x86_64::{
-            _mm256_add_epi32, _mm256_castsi256_si128, _mm256_cvtepi16_epi32,
-            _mm256_extracti128_si256, _mm256_loadu_si256, _mm256_min_epi32, _mm_extract_epi32,
-            _mm_loadu_si128, _mm_min_epi32, _mm_shuffle_epi32,
+            _mm_extract_epi32, _mm_loadu_si128, _mm_min_epi32, _mm_shuffle_epi32, _mm256_add_epi32,
+            _mm256_castsi256_si128, _mm256_cvtepi16_epi32, _mm256_extracti128_si256,
+            _mm256_loadu_si256, _mm256_min_epi32,
         };
 
         let len = prev_costs.len().min(conn_costs.len());
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
 
         let chunks = len / 8;
         let ptr_p = prev_costs.as_ptr();
@@ -130,7 +143,8 @@ pub mod x86_impl {
         let prefix_min: i32 = if chunks > 0 {
             // SAFETY: pointers valid for >=8 elements; avx2 verified by caller.
             let prev_v = unsafe { _mm256_loadu_si256(ptr_p as *const core::arch::x86_64::__m256i) };
-            let conn_narrow = unsafe { _mm_loadu_si128(ptr_c as *const core::arch::x86_64::__m128i) };
+            let conn_narrow =
+                unsafe { _mm_loadu_si128(ptr_c as *const core::arch::x86_64::__m128i) };
             let conn_v = _mm256_cvtepi16_epi32(conn_narrow);
             let mut sum_min = _mm256_add_epi32(prev_v, conn_v);
 
@@ -155,7 +169,9 @@ pub mod x86_impl {
             let shuf2 = _mm_shuffle_epi32(v64, 0b_00_00_10_10);
             let v32 = _mm_min_epi32(v64, shuf2);
             _mm_extract_epi32(v32, 0)
-        } else { i32::MAX };
+        } else {
+            i32::MAX
+        };
 
         let covered = chunks * 8;
         let mut best_idx = 0usize;
@@ -163,13 +179,19 @@ pub mod x86_impl {
 
         for i in covered..len {
             let sum = prev_costs[i].saturating_add(conn_costs[i] as i32);
-            if sum < best_cost { best_cost = sum; best_idx = i; }
+            if sum < best_cost {
+                best_cost = sum;
+                best_idx = i;
+            }
         }
 
         if best_cost == prefix_min {
             for i in 0..covered {
                 let sum = prev_costs[i].saturating_add(conn_costs[i] as i32);
-                if sum == prefix_min { best_idx = i; break; }
+                if sum == prefix_min {
+                    best_idx = i;
+                    break;
+                }
             }
         }
 
@@ -191,7 +213,9 @@ pub mod x86_impl {
 
         let len = costs.len();
         let chunks = len / 4;
-        if chunks == 0 { return scalar_min_forward(costs); }
+        if chunks == 0 {
+            return scalar_min_forward(costs);
+        }
 
         let ptr = costs.as_ptr();
         // SAFETY: ptr valid for >=4x4=16 bytes (chunks>=1); sse4.1 verified by caller.
@@ -216,10 +240,16 @@ pub mod x86_impl {
             scalar_min_from(&costs[covered..])
                 .map(|(i, v)| (i + covered, v))
                 .unwrap_or((0, i32::MAX))
-        } else { (0, i32::MAX) };
+        } else {
+            (0, i32::MAX)
+        };
 
         let global_min = sse_min.min(rem_val);
-        if rem_val < sse_min { (rem_idx, rem_val) } else { find_index_of(&costs[..covered], global_min) }
+        if rem_val < sse_min {
+            (rem_idx, rem_val)
+        } else {
+            find_index_of(&costs[..covered], global_min)
+        }
     }
 
     /// Find best predecessor using SSE4.1: argmin(prev_costs[i] + conn_costs[i]).
@@ -233,12 +263,14 @@ pub mod x86_impl {
         conn_costs: &[i16],
     ) -> Option<(usize, i32)> {
         use core::arch::x86_64::{
-            _mm_add_epi32, _mm_cvtepi16_epi32, _mm_extract_epi32, _mm_loadu_si128, _mm_loadu_si64,
+            _mm_add_epi32, _mm_cvtepi16_epi32, _mm_extract_epi32, _mm_loadu_si64, _mm_loadu_si128,
             _mm_min_epi32, _mm_shuffle_epi32,
         };
 
         let len = prev_costs.len().min(conn_costs.len());
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
 
         let chunks = len / 4;
         let ptr_p = prev_costs.as_ptr();
@@ -268,7 +300,9 @@ pub mod x86_impl {
             let shuf2 = _mm_shuffle_epi32(v2, 0b_00_00_10_10);
             let v1 = _mm_min_epi32(v2, shuf2);
             _mm_extract_epi32(v1, 0)
-        } else { i32::MAX };
+        } else {
+            i32::MAX
+        };
 
         let covered = chunks * 4;
         let mut best_idx = 0usize;
@@ -276,13 +310,19 @@ pub mod x86_impl {
 
         for i in covered..len {
             let sum = prev_costs[i].saturating_add(conn_costs[i] as i32);
-            if sum < best_cost { best_cost = sum; best_idx = i; }
+            if sum < best_cost {
+                best_cost = sum;
+                best_idx = i;
+            }
         }
 
         if best_cost == prefix_min {
             for i in 0..covered {
                 let sum = prev_costs[i].saturating_add(conn_costs[i] as i32);
-                if sum == prefix_min { best_idx = i; break; }
+                if sum == prefix_min {
+                    best_idx = i;
+                    break;
+                }
             }
         }
 
@@ -310,13 +350,16 @@ pub mod x86_impl {
         best_so_far: i64,
     ) -> Option<(usize, i64)> {
         use core::arch::x86_64::{
-            _mm256_add_epi64, _mm256_blendv_epi8, _mm256_castsi256_si128, _mm256_cmpgt_epi64,
-            _mm256_cvtepi32_epi64, _mm256_extracti128_si256, _mm256_loadu_si256, _mm_blendv_epi8,
-            _mm_cmpgt_epi64, _mm_cvtsi128_si64, _mm_loadu_si128, _mm_shuffle_epi32,
+            _mm_blendv_epi8, _mm_cmpgt_epi64, _mm_cvtsi128_si64, _mm_loadu_si128,
+            _mm_shuffle_epi32, _mm256_add_epi64, _mm256_blendv_epi8, _mm256_castsi256_si128,
+            _mm256_cmpgt_epi64, _mm256_cvtepi32_epi64, _mm256_extracti128_si256,
+            _mm256_loadu_si256,
         };
 
         let len = prev.len().min(conn.len());
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
 
         let chunks4 = len / 4;
         let ptr_p = prev.as_ptr();
@@ -358,7 +401,9 @@ pub mod x86_impl {
             let v1 = _mm_blendv_epi8(v2, shuf, mask_final);
             // SAFETY: _mm_cvtsi128_si64 extracts lane 0 as i64.
             _mm_cvtsi128_si64(v1)
-        } else { i64::MAX };
+        } else {
+            i64::MAX
+        };
 
         let covered = chunks4 * 4;
         let mut best_idx = 0usize;
@@ -367,7 +412,11 @@ pub mod x86_impl {
 
         for i in covered..len {
             let total = prev[i] + conn[i] as i64 + wcost;
-            if total < best_total { best_total = total; best_idx = i; found = true; }
+            if total < best_total {
+                best_total = total;
+                best_idx = i;
+                found = true;
+            }
         }
 
         let simd_with_wcost = simd_min.saturating_add(wcost);
@@ -375,12 +424,19 @@ pub mod x86_impl {
             for i in 0..covered {
                 let total = prev[i] + conn[i] as i64 + wcost;
                 if total == simd_with_wcost {
-                    best_total = simd_with_wcost; best_idx = i; found = true; break;
+                    best_total = simd_with_wcost;
+                    best_idx = i;
+                    found = true;
+                    break;
                 }
             }
         }
 
-        if found { Some((best_idx, best_total)) } else { None }
+        if found {
+            Some((best_idx, best_total))
+        } else {
+            None
+        }
     }
 
     /// Find best predecessor over i64 costs using SSE4.1 (2 x i64 per register).
@@ -398,12 +454,14 @@ pub mod x86_impl {
         best_so_far: i64,
     ) -> Option<(usize, i64)> {
         use core::arch::x86_64::{
-            _mm_add_epi64, _mm_blendv_epi8, _mm_cmpgt_epi64, _mm_cvtepi32_epi64,
-            _mm_cvtsi128_si64, _mm_loadu_si128, _mm_loadu_si64, _mm_shuffle_epi32,
+            _mm_add_epi64, _mm_blendv_epi8, _mm_cmpgt_epi64, _mm_cvtepi32_epi64, _mm_cvtsi128_si64,
+            _mm_loadu_si64, _mm_loadu_si128, _mm_shuffle_epi32,
         };
 
         let len = prev.len().min(conn.len());
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
 
         let chunks2 = len / 2;
         let ptr_p = prev.as_ptr();
@@ -440,7 +498,9 @@ pub mod x86_impl {
             let v1 = _mm_blendv_epi8(lane_min, shuf, mask_final);
             // SAFETY: lane 0 always valid.
             _mm_cvtsi128_si64(v1)
-        } else { i64::MAX };
+        } else {
+            i64::MAX
+        };
 
         let covered = chunks2 * 2;
         let mut best_idx = 0usize;
@@ -449,7 +509,11 @@ pub mod x86_impl {
 
         for i in covered..len {
             let total = prev[i] + conn[i] as i64 + wcost;
-            if total < best_total { best_total = total; best_idx = i; found = true; }
+            if total < best_total {
+                best_total = total;
+                best_idx = i;
+                found = true;
+            }
         }
 
         let simd_with_wcost = simd_min.saturating_add(wcost);
@@ -457,12 +521,19 @@ pub mod x86_impl {
             for i in 0..covered {
                 let total = prev[i] + conn[i] as i64 + wcost;
                 if total == simd_with_wcost {
-                    best_total = simd_with_wcost; best_idx = i; found = true; break;
+                    best_total = simd_with_wcost;
+                    best_idx = i;
+                    found = true;
+                    break;
                 }
             }
         }
 
-        if found { Some((best_idx, best_total)) } else { None }
+        if found {
+            Some((best_idx, best_total))
+        } else {
+            None
+        }
     }
 
     // ── Public dispatch ───────────────────────────────────────────────────────
@@ -472,7 +543,9 @@ pub mod x86_impl {
     /// Priority: compile-time `avx2` -> compile-time `sse4.1` -> runtime
     /// `is_x86_feature_detected!` -> scalar fallback.
     pub fn find_min(costs: &[i32]) -> Option<(usize, i32)> {
-        if costs.is_empty() { return None; }
+        if costs.is_empty() {
+            return None;
+        }
 
         #[cfg(target_feature = "avx2")]
         {
@@ -505,7 +578,9 @@ pub mod x86_impl {
     /// Priority: compile-time `avx2` -> compile-time `sse4.1` -> runtime detection -> scalar.
     pub fn find_best_predecessor(prev_costs: &[i32], conn_costs: &[i16]) -> Option<(usize, i32)> {
         let len = prev_costs.len().min(conn_costs.len());
-        if len == 0 { return None; }
+        if len == 0 {
+            return None;
+        }
 
         #[cfg(target_feature = "avx2")]
         {
@@ -582,7 +657,9 @@ pub mod x86_gather {
     /// Returns the number of elements written (<=`right_ids.len().min(16)`).
     pub fn gather_widen(row_data: &[i16], right_ids: &[u16], out: &mut [i32]) -> usize {
         let count = right_ids.len().min(out.len()).min(16);
-        if count == 0 { return 0; }
+        if count == 0 {
+            return 0;
+        }
 
         let row_len = row_data.len();
 
@@ -622,7 +699,9 @@ pub mod x86_gather {
                 return count;
             }
             // Scalar fallback.
-            for i in 0..count { out[i] = gathered[i] as i32; }
+            for i in 0..count {
+                out[i] = gathered[i] as i32;
+            }
             count
         }
     }
@@ -635,7 +714,7 @@ pub mod x86_gather {
     /// `gathered` is a 16-element array; `out` must hold >= `count` elements.
     #[target_feature(enable = "avx2")]
     unsafe fn avx2_widen(gathered: &[i16; 16], count: usize, out: &mut [i32]) {
-        use core::arch::x86_64::{_mm256_cvtepi16_epi32, _mm256_storeu_si256, _mm_loadu_si128};
+        use core::arch::x86_64::{_mm_loadu_si128, _mm256_cvtepi16_epi32, _mm256_storeu_si256};
 
         let chunks = count / 8;
         let ptr_g = gathered.as_ptr();
@@ -643,9 +722,8 @@ pub mod x86_gather {
         for chunk in 0..chunks {
             let base = chunk * 8;
             // SAFETY: base+7 < 16 (chunks<=2); out[base..base+8] in bounds.
-            let narrow = unsafe {
-                _mm_loadu_si128(ptr_g.add(base) as *const core::arch::x86_64::__m128i)
-            };
+            let narrow =
+                unsafe { _mm_loadu_si128(ptr_g.add(base) as *const core::arch::x86_64::__m128i) };
             let wide = _mm256_cvtepi16_epi32(narrow);
             unsafe {
                 _mm256_storeu_si256(
@@ -656,7 +734,9 @@ pub mod x86_gather {
         }
 
         let covered = chunks * 8;
-        for i in covered..count { out[i] = gathered[i] as i32; }
+        for i in covered..count {
+            out[i] = gathered[i] as i32;
+        }
     }
 
     /// Widen gathered[..count] i16->i32 using SSE4.1 (4 lanes per register).
@@ -686,6 +766,8 @@ pub mod x86_gather {
         }
 
         let covered = chunks * 4;
-        for i in covered..count { out[i] = gathered[i] as i32; }
+        for i in covered..count {
+            out[i] = gathered[i] as i32;
+        }
     }
 }

@@ -327,10 +327,7 @@ struct HeapEntry {
 }
 
 impl BpeState {
-    fn new(
-        word_freqs: HashMap<Vec<String>, u64>,
-        special_tokens: &[String],
-    ) -> Result<Self> {
+    fn new(word_freqs: HashMap<Vec<String>, u64>, special_tokens: &[String]) -> Result<Self> {
         let mut sym_table: Vec<String> = Vec::new();
         let mut sym_intern: HashMap<String, SymId> = HashMap::new();
 
@@ -382,8 +379,7 @@ impl BpeState {
         }
 
         // ── Populate heap ────────────────────────────────────────────────────
-        let mut heap: BinaryHeap<Reverse<HeapEntry>> =
-            BinaryHeap::with_capacity(pair_freq.len());
+        let mut heap: BinaryHeap<Reverse<HeapEntry>> = BinaryHeap::with_capacity(pair_freq.len());
         for (&(a, b), &freq) in &pair_freq {
             heap.push(Reverse(HeapEntry {
                 neg_freq: -(freq as i64),
@@ -650,7 +646,9 @@ mod tests {
     fn test_bpe_trainer_small_corpus() {
         let corpus = small_corpus();
         let trainer = BpeTrainer::new(200).with_min_frequency(2);
-        let vocab = trainer.train(corpus.into_iter()).expect("train must succeed");
+        let vocab = trainer
+            .train(corpus.into_iter())
+            .expect("train must succeed");
 
         assert!(
             !vocab.merges.is_empty(),
@@ -661,10 +659,7 @@ mod tests {
             "vocab map must be non-empty after training"
         );
         // Special tokens must be present.
-        assert!(
-            vocab.vocab.contains_key("[UNK]"),
-            "[UNK] must be in vocab"
-        );
+        assert!(vocab.vocab.contains_key("[UNK]"), "[UNK] must be in vocab");
     }
 
     #[test]
@@ -676,7 +671,9 @@ mod tests {
             "東京 東京 東京 東京 東京 東京".to_string(),
         ];
         let trainer = BpeTrainer::new(50).with_min_frequency(2);
-        let vocab = trainer.train(corpus.into_iter()).expect("train must succeed");
+        let vocab = trainer
+            .train(corpus.into_iter())
+            .expect("train must succeed");
 
         // Encoding the string should not panic and should return non-empty result.
         let tokens = vocab.encode("東京");
@@ -700,7 +697,9 @@ mod tests {
     fn test_bpe_save_load_json() {
         let corpus = small_corpus();
         let trainer = BpeTrainer::new(100).with_min_frequency(2);
-        let vocab = trainer.train(corpus.into_iter()).expect("train must succeed");
+        let vocab = trainer
+            .train(corpus.into_iter())
+            .expect("train must succeed");
         let merge_count = vocab.merges.len();
 
         let path = std::env::temp_dir().join("bpe_test.json");
@@ -730,7 +729,9 @@ mod tests {
             "東京 大阪".to_string(),
         ];
         let trainer = BpeTrainer::new(500).with_min_frequency(100);
-        let vocab = trainer.train(corpus.into_iter()).expect("train must succeed");
+        let vocab = trainer
+            .train(corpus.into_iter())
+            .expect("train must succeed");
 
         assert_eq!(
             vocab.merges.len(),

@@ -17,13 +17,13 @@
 pub mod analysis;
 mod fb;
 pub mod nbest;
-pub mod train;
-pub mod train_loop;
 /// SIMD-accelerated cost functions.
 ///
 /// Always compiled; individual functions dispatch to NEON, AVX2/SSE4.1, WASM
 /// simd128, or a scalar fallback depending on the build target.
 pub mod simd;
+pub mod train;
+pub mod train_loop;
 
 use simd::{batch_connection_costs, batch_min_argmin_i64};
 
@@ -157,7 +157,11 @@ impl<'a> ViterbiTableCsr<'a> {
     /// been pushed.
     #[inline]
     fn push(&mut self, pos: usize, cost: i64, cold: ViterbiCold<'a>) {
-        debug_assert_eq!(pos, self.current_pos, "push: pos {pos} != current_pos {}", self.current_pos);
+        debug_assert_eq!(
+            pos, self.current_pos,
+            "push: pos {pos} != current_pos {}",
+            self.current_pos
+        );
         self.right_ids_data.push(cold.node.right_id);
         self.costs_data.push(cost);
         self.cold_data.push(cold);
@@ -170,7 +174,11 @@ impl<'a> ViterbiTableCsr<'a> {
     /// and before any `push(pos+1, …)` calls.
     #[inline]
     fn seal_position(&mut self, pos: usize) {
-        debug_assert_eq!(pos, self.current_pos, "seal_position: pos {pos} != current_pos {}", self.current_pos);
+        debug_assert_eq!(
+            pos, self.current_pos,
+            "seal_position: pos {pos} != current_pos {}",
+            self.current_pos
+        );
         debug_assert!(pos < self.n, "seal_position: pos {pos} >= n {}", self.n);
         self.offsets[pos + 1] = self.costs_data.len() as u32;
         self.current_pos = pos + 1;
@@ -417,12 +425,9 @@ impl<'a> ViterbiSolver<'a> {
 
                 // SIMD-accelerated argmin: prev[i] + conn[i] + node_wcost over the chunk.
                 let chunk_prev = &cost_row[base..base + written];
-                if let Some((rel_idx, total_cost)) = batch_min_argmin_i64(
-                    chunk_prev,
-                    &conn_buf[..written],
-                    node_wcost,
-                    *best_cost,
-                ) {
+                if let Some((rel_idx, total_cost)) =
+                    batch_min_argmin_i64(chunk_prev, &conn_buf[..written], node_wcost, *best_cost)
+                {
                     *best_cost = total_cost;
                     *best_prev = Some((base + rel_idx) as u32);
                     *best_prev_pos = prev_pos as u32;
@@ -699,9 +704,8 @@ impl<'a> ViterbiSolver<'a> {
             // The loop above was dead code — the guard `pred_cold.node.end == node.start`
             // can never be true for any entry at positions < node.start + 1 by construction.
             debug_assert!(
-                (1..primary_pred_pos.min(len)).all(|cp| {
-                    table.cold_at(cp).iter().all(|c| c.node.end != node.start)
-                }),
+                (1..primary_pred_pos.min(len))
+                    .all(|cp| { table.cold_at(cp).iter().all(|c| c.node.end != node.start) }),
                 "Lattice invariant violated: predecessor found outside primary_pred_pos"
             );
         }
@@ -931,8 +935,24 @@ mod tests {
         let mut table: ViterbiTableCsr<'_> = ViterbiTableCsr::new(3);
 
         // Position 0: 2 entries with costs 10 and 20
-        table.push(0, 10, ViterbiCold { node: &bos, prev: None, pos: 0 });
-        table.push(0, 20, ViterbiCold { node: &bos, prev: None, pos: 0 });
+        table.push(
+            0,
+            10,
+            ViterbiCold {
+                node: &bos,
+                prev: None,
+                pos: 0,
+            },
+        );
+        table.push(
+            0,
+            20,
+            ViterbiCold {
+                node: &bos,
+                prev: None,
+                pos: 0,
+            },
+        );
         table.seal_position(0);
 
         assert_eq!(table.len_at(0), 2);
@@ -940,16 +960,48 @@ mod tests {
         assert_eq!(table.right_ids_at(0).len(), 2);
 
         // Position 1: 3 entries with costs 5, 15, 25
-        table.push(1, 5, ViterbiCold { node: &bos, prev: Some(0), pos: 0 });
-        table.push(1, 15, ViterbiCold { node: &bos, prev: Some(1), pos: 0 });
-        table.push(1, 25, ViterbiCold { node: &bos, prev: Some(0), pos: 0 });
+        table.push(
+            1,
+            5,
+            ViterbiCold {
+                node: &bos,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
+        table.push(
+            1,
+            15,
+            ViterbiCold {
+                node: &bos,
+                prev: Some(1),
+                pos: 0,
+            },
+        );
+        table.push(
+            1,
+            25,
+            ViterbiCold {
+                node: &bos,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
         table.seal_position(1);
 
         assert_eq!(table.len_at(1), 3);
         assert_eq!(table.costs_at(1), &[5_i64, 15, 25]);
 
         // Position 2: 1 entry with cost 100
-        table.push(2, 100, ViterbiCold { node: &bos, prev: Some(0), pos: 1 });
+        table.push(
+            2,
+            100,
+            ViterbiCold {
+                node: &bos,
+                prev: Some(0),
+                pos: 1,
+            },
+        );
         table.seal_position(2);
 
         assert_eq!(table.len_at(2), 1);
@@ -1011,12 +1063,36 @@ mod tests {
         let mut table: ViterbiTableCsr<'a> = ViterbiTableCsr::new(n);
 
         // pos 0: BOS entry, cost=0
-        table.push(0, 0, ViterbiCold { node: bos_node, prev: None, pos: 0 });
+        table.push(
+            0,
+            0,
+            ViterbiCold {
+                node: bos_node,
+                prev: None,
+                pos: 0,
+            },
+        );
         table.seal_position(0);
 
         // pos 1: word_node (cost = word_cum_cost) and eos_node (cost = eos_cum_cost)
-        table.push(1, word_cum_cost, ViterbiCold { node: word_node, prev: Some(0), pos: 0 });
-        table.push(1, eos_cum_cost, ViterbiCold { node: eos_node, prev: Some(0), pos: 0 });
+        table.push(
+            1,
+            word_cum_cost,
+            ViterbiCold {
+                node: word_node,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
+        table.push(
+            1,
+            eos_cum_cost,
+            ViterbiCold {
+                node: eos_node,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
         table.seal_position(1);
 
         table
@@ -1049,8 +1125,7 @@ mod tests {
         };
 
         let table = make_synthetic_csr_table(
-            &bos_node, &word_node, &eos_node,
-            50,  // word_node cumulative cost
+            &bos_node, &word_node, &eos_node, 50,  // word_node cumulative cost
             200, // eos_node cumulative cost
         );
 
@@ -1092,13 +1167,45 @@ mod tests {
         let n = 2;
         let mut table: ViterbiTableCsr<'_> = ViterbiTableCsr::new(n);
 
-        table.push(0, 0, ViterbiCold { node: &bos_node, prev: None, pos: 0 });
+        table.push(
+            0,
+            0,
+            ViterbiCold {
+                node: &bos_node,
+                prev: None,
+                pos: 0,
+            },
+        );
         table.seal_position(0);
 
         // Three EOS entries with costs 300, 100, 200 (deliberately unsorted)
-        table.push(1, 300, ViterbiCold { node: &eos1, prev: Some(0), pos: 0 });
-        table.push(1, 100, ViterbiCold { node: &eos2, prev: Some(0), pos: 0 });
-        table.push(1, 200, ViterbiCold { node: &eos3, prev: Some(0), pos: 0 });
+        table.push(
+            1,
+            300,
+            ViterbiCold {
+                node: &eos1,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
+        table.push(
+            1,
+            100,
+            ViterbiCold {
+                node: &eos2,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
+        table.push(
+            1,
+            200,
+            ViterbiCold {
+                node: &eos3,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
         table.seal_position(1);
 
         // Verify all three are seeded as genuine EOS candidates
@@ -1115,7 +1222,11 @@ mod tests {
         // Sort them as nbest_exact would via min-heap: expect [100, 200, 300]
         let mut costs: Vec<i64> = seeds.iter().map(|(_, c)| *c).collect();
         costs.sort_unstable();
-        assert_eq!(costs, vec![100, 200, 300], "sorted costs must be non-decreasing");
+        assert_eq!(
+            costs,
+            vec![100, 200, 300],
+            "sorted costs must be non-decreasing"
+        );
     }
 
     /// `test_nbest_exact_paths_are_distinct`: multiple complete paths differ in content.
@@ -1162,15 +1273,55 @@ mod tests {
         let n = 3;
         let mut table: ViterbiTableCsr<'_> = ViterbiTableCsr::new(n);
 
-        table.push(0, 0, ViterbiCold { node: &bos_node, prev: None, pos: 0 });
+        table.push(
+            0,
+            0,
+            ViterbiCold {
+                node: &bos_node,
+                prev: None,
+                pos: 0,
+            },
+        );
         table.seal_position(0);
 
-        table.push(1, 100, ViterbiCold { node: &word_a, prev: Some(0), pos: 0 });
-        table.push(1, 200, ViterbiCold { node: &word_b, prev: Some(0), pos: 0 });
+        table.push(
+            1,
+            100,
+            ViterbiCold {
+                node: &word_a,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
+        table.push(
+            1,
+            200,
+            ViterbiCold {
+                node: &word_b,
+                prev: Some(0),
+                pos: 0,
+            },
+        );
         table.seal_position(1);
 
-        table.push(2, 150, ViterbiCold { node: &eos_node_a, prev: Some(0), pos: 1 });
-        table.push(2, 250, ViterbiCold { node: &eos_node_b, prev: Some(1), pos: 1 });
+        table.push(
+            2,
+            150,
+            ViterbiCold {
+                node: &eos_node_a,
+                prev: Some(0),
+                pos: 1,
+            },
+        );
+        table.push(
+            2,
+            250,
+            ViterbiCold {
+                node: &eos_node_b,
+                prev: Some(1),
+                pos: 1,
+            },
+        );
         table.seal_position(2);
 
         // Verify the two EOS entries at pos 2
@@ -1190,7 +1341,10 @@ mod tests {
             .map(|(i, _)| table.cold_at(2)[*i].prev.expect("must have prev"))
             .collect();
 
-        assert_ne!(prev_indices[0], prev_indices[1], "EOS predecessors must differ");
+        assert_ne!(
+            prev_indices[0], prev_indices[1],
+            "EOS predecessors must differ"
+        );
 
         // The predecessor nodes must have different surfaces
         let pred_surfaces: Vec<&str> = prev_indices
@@ -1198,7 +1352,10 @@ mod tests {
             .map(|&p| table.cold_at(1)[p as usize].node.surface)
             .collect();
 
-        assert_ne!(pred_surfaces[0], pred_surfaces[1], "paths must use different words");
+        assert_ne!(
+            pred_surfaces[0], pred_surfaces[1],
+            "paths must use different words"
+        );
     }
 
     // ── EOS filter regression tests ──────────────────────────────────────────
@@ -1603,13 +1760,19 @@ mod right_id_hot_tests {
         );
         table.seal_position(0);
 
-        assert_eq!(table.right_ids_at(0).len(), 2, "right_ids length must match costs length");
         assert_eq!(
-            table.right_ids_at(0)[0], node.right_id,
+            table.right_ids_at(0).len(),
+            2,
+            "right_ids length must match costs length"
+        );
+        assert_eq!(
+            table.right_ids_at(0)[0],
+            node.right_id,
             "right_ids[0] must equal node.right_id"
         );
         assert_eq!(
-            table.right_ids_at(0)[1], node.right_id,
+            table.right_ids_at(0)[1],
+            node.right_id,
             "right_ids[1] must equal node.right_id"
         );
         // Parallel invariant: all three flat arrays must have the same length.

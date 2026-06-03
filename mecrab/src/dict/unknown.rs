@@ -191,11 +191,7 @@ impl UnknownDictionary {
     ///
     /// * `category` - The character category
     /// * `length` - The length of the unknown word surface in bytes
-    pub fn generate_entries(
-        &self,
-        category: CharCategory,
-        length: usize,
-    ) -> Vec<DictionaryEntry> {
+    pub fn generate_entries(&self, category: CharCategory, length: usize) -> Vec<DictionaryEntry> {
         // Cache hit: clone prototype entries and inject the real byte-length.
         if let Some(templates) = self.templates.get(&category) {
             return templates
@@ -241,13 +237,13 @@ mod tests {
         for &cat in ALL_CATEGORIES {
             let name = category_name(cat);
             assert!(!name.is_empty(), "category name must be non-empty");
-            assert!(
-                seen.insert(name),
-                "category name '{}' is duplicated",
-                name
-            );
+            assert!(seen.insert(name), "category name '{}' is duplicated", name);
         }
-        assert_eq!(seen.len(), 11, "expected exactly 11 distinct category names");
+        assert_eq!(
+            seen.len(),
+            11,
+            "expected exactly 11 distinct category names"
+        );
     }
 
     /// Golden-value test: verify that `generate_entries` with and without the

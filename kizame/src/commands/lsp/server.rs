@@ -8,8 +8,8 @@ use std::sync::Arc;
 use dashmap::DashMap;
 use mecrab::MeCrab;
 use tokio::sync::RwLock;
-use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range, Url};
 use tower_lsp::Client;
+use tower_lsp::lsp_types::{Diagnostic, DiagnosticSeverity, MessageType, Position, Range, Url};
 
 /// MeCrab Language Server state
 pub struct MeCrabLanguageServer {

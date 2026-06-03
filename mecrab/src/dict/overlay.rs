@@ -20,8 +20,8 @@
 
 use crate::dict::DictionaryEntry;
 use std::collections::HashMap;
-use std::sync::{Arc, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::{Arc, RwLock};
 use yada::DoubleArray;
 use yada::builder::DoubleArrayBuilder;
 
@@ -498,7 +498,12 @@ mod tests {
         // Add a second entry under the same surface key
         overlay.add_word(
             "テスト",
-            OverlayEntry::with_context(100, 100, 6000, "名詞,サ変接続,*,*,*,*,テスト,テスト,テスト"),
+            OverlayEntry::with_context(
+                100,
+                100,
+                6000,
+                "名詞,サ変接続,*,*,*,*,テスト,テスト,テスト",
+            ),
         );
         assert_eq!(overlay.len(), 2, "two entries for same surface");
 

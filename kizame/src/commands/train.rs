@@ -207,7 +207,7 @@ fn build_trained_mecrab(
     matrix_bytes: &[u8],
     word_overrides: std::collections::HashMap<u32, i16>,
 ) -> Result<MeCrab, Box<dyn std::error::Error>> {
-    use mecrab::dict::{SYS_DIC_FILE, CHAR_BIN_FILE, UNK_DIC_FILE};
+    use mecrab::dict::{CHAR_BIN_FILE, SYS_DIC_FILE, UNK_DIC_FILE};
 
     let sys_dic_bytes = std::fs::read(dicdir.join(SYS_DIC_FILE))?;
     let char_bin_bytes = std::fs::read(dicdir.join(CHAR_BIN_FILE))?;
@@ -334,9 +334,7 @@ pub fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
                 f
             }
             Err(e) => {
-                eprintln!(
-                    "Warning: could not hot-reload trained model for dev eval: {e}"
-                );
+                eprintln!("Warning: could not hot-reload trained model for dev eval: {e}");
                 0.0
             }
         }
@@ -352,9 +350,7 @@ pub fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
         .clone()
         .unwrap_or_else(|| args.dicdir.join("matrix.bin"));
 
-    let regressed = dev_count > 0
-        && args.require_improvement
-        && trained_f1 <= baseline_f1;
+    let regressed = dev_count > 0 && args.require_improvement && trained_f1 <= baseline_f1;
 
     let matrix_output_path = if regressed {
         let candidate = primary_output.with_extension("bin.candidate");
@@ -413,7 +409,10 @@ pub fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
     if regressed {
         eprintln!();
         eprintln!("NOTE: Matrix written to .candidate path (regression guard active).");
-        eprintln!("  To use anyway: mv {:?} {:?}", matrix_output_path, primary_output);
+        eprintln!(
+            "  To use anyway: mv {:?} {:?}",
+            matrix_output_path, primary_output
+        );
     }
 
     Ok(())

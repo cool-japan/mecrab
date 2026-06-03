@@ -14,7 +14,7 @@
 
 use crate::char_writer::{CharRange, build_char_bytes, pack_char_info};
 use crate::matrix_writer::{build_matrix_bytes, set_cost};
-use crate::sysdic_writer::{DicEntry, build_unkdic_bytes, build_sysdic_bytes};
+use crate::sysdic_writer::{DicEntry, build_sysdic_bytes, build_unkdic_bytes};
 
 /// The four binary byte buffers that constitute a complete MeCab-format dictionary.
 pub struct SyntheticDictionary {
@@ -163,14 +163,14 @@ fn matrix_costs() -> Vec<i16> {
     let n = lsize * RSIZE as usize;
     let mut costs = vec![1000i16; n];
 
-    set_cost(&mut costs, lsize, 0, 1, 0);     // BOS → noun
-    set_cost(&mut costs, lsize, 0, 2, 200);   // BOS → particle
-    set_cost(&mut costs, lsize, 1, 0, 0);     // noun → EOS
-    set_cost(&mut costs, lsize, 2, 0, 400);   // particle → EOS
-    set_cost(&mut costs, lsize, 1, 2, 0);     // noun → particle
-    set_cost(&mut costs, lsize, 2, 1, 0);     // particle → noun
-    set_cost(&mut costs, lsize, 1, 1, 1500);  // noun → noun (expensive)
-    set_cost(&mut costs, lsize, 2, 2, 1500);  // particle → particle (expensive)
+    set_cost(&mut costs, lsize, 0, 1, 0); // BOS → noun
+    set_cost(&mut costs, lsize, 0, 2, 200); // BOS → particle
+    set_cost(&mut costs, lsize, 1, 0, 0); // noun → EOS
+    set_cost(&mut costs, lsize, 2, 0, 400); // particle → EOS
+    set_cost(&mut costs, lsize, 1, 2, 0); // noun → particle
+    set_cost(&mut costs, lsize, 2, 1, 0); // particle → noun
+    set_cost(&mut costs, lsize, 1, 1, 1500); // noun → noun (expensive)
+    set_cost(&mut costs, lsize, 2, 2, 1500); // particle → particle (expensive)
 
     costs
 }
@@ -212,48 +212,96 @@ const CATEGORY_NAMES: &[&str] = &[
 
 fn make_char_info(id: usize) -> u32 {
     pack_char_info(
-        1u32 << id,   // type_mask: exactly bit `id`
-        id as u8,     // default_type: category id
-        0,            // length: 0 (no explicit limit)
-        true,         // group: true (group consecutive same-category chars)
-        true,         // invoke: true (invoke unknown-word processing)
+        1u32 << id, // type_mask: exactly bit `id`
+        id as u8,   // default_type: category id
+        0,          // length: 0 (no explicit limit)
+        true,       // group: true (group consecutive same-category chars)
+        true,       // invoke: true (invoke unknown-word processing)
     )
 }
 
 fn char_ranges() -> Vec<CharRange> {
     vec![
         // id=1 (SPACE): U+0020 (space)
-        CharRange { lo: 0x0020, hi: 0x0020, info: make_char_info(1) },
+        CharRange {
+            lo: 0x0020,
+            hi: 0x0020,
+            info: make_char_info(1),
+        },
         // id=3 (SYMBOL): U+0021 ('!') — needed for should_group representative
         //   Also U+3000..=U+303F (CJK symbols and punctuation)
-        CharRange { lo: 0x0021, hi: 0x0021, info: make_char_info(3) },
-        CharRange { lo: 0x3000, hi: 0x303F, info: make_char_info(3) },
+        CharRange {
+            lo: 0x0021,
+            hi: 0x0021,
+            info: make_char_info(3),
+        },
+        CharRange {
+            lo: 0x3000,
+            hi: 0x303F,
+            info: make_char_info(3),
+        },
         // id=4 (NUMERIC): U+0030..=U+0039 ('0'..'9')
-        CharRange { lo: 0x0030, hi: 0x0039, info: make_char_info(4) },
+        CharRange {
+            lo: 0x0030,
+            hi: 0x0039,
+            info: make_char_info(4),
+        },
         // id=5 (ALPHA): U+0041..=U+005A ('A'..'Z'), U+0061..=U+007A ('a'..'z')
-        CharRange { lo: 0x0041, hi: 0x005A, info: make_char_info(5) },
-        CharRange { lo: 0x0061, hi: 0x007A, info: make_char_info(5) },
+        CharRange {
+            lo: 0x0041,
+            hi: 0x005A,
+            info: make_char_info(5),
+        },
+        CharRange {
+            lo: 0x0061,
+            hi: 0x007A,
+            info: make_char_info(5),
+        },
         // id=6 (HIRAGANA): U+3041..=U+3096
         // Covers 'あ' (U+3042), 'す'(U+3059), 'も'(U+3082), 'の'(U+306E),
         //         'う'(U+3046), 'ち'(U+3061), 'は'(U+306F)
-        CharRange { lo: 0x3041, hi: 0x3096, info: make_char_info(6) },
+        CharRange {
+            lo: 0x3041,
+            hi: 0x3096,
+            info: make_char_info(6),
+        },
         // id=7 (KATAKANA): U+30A1..=U+30FC
         // Covers 'ア'(U+30A2), 'グ'(U+30B0), 'ー'(U+30FC) etc.
-        CharRange { lo: 0x30A1, hi: 0x30FC, info: make_char_info(7) },
+        CharRange {
+            lo: 0x30A1,
+            hi: 0x30FC,
+            info: make_char_info(7),
+        },
         // id=8 (KANJINUMERIC): U+4E00 ('一') alone — representative char
         // We assign it KANJINUMERIC to disambiguate from KANJI.
         // Note: '一' = U+4E00 is the first CJK ideograph.
-        CharRange { lo: 0x4E00, hi: 0x4E00, info: make_char_info(8) },
+        CharRange {
+            lo: 0x4E00,
+            hi: 0x4E00,
+            info: make_char_info(8),
+        },
         // id=2 (KANJI): U+4E01..=U+9FFF (rest of CJK block, after '一')
         // Covers '漢'(U+6F22), '東'(U+6771), '京'(U+4EAC), '日'(U+65E5), '本'(U+672C),
         //        '人'(U+4EBA)
-        CharRange { lo: 0x4E01, hi: 0x9FFF, info: make_char_info(2) },
+        CharRange {
+            lo: 0x4E01,
+            hi: 0x9FFF,
+            info: make_char_info(2),
+        },
         // id=9 (GREEK): U+0391..=U+03C9 (Greek and Coptic block)
         // Covers 'Α'(U+0391)
-        CharRange { lo: 0x0391, hi: 0x03C9, info: make_char_info(9) },
+        CharRange {
+            lo: 0x0391,
+            hi: 0x03C9,
+            info: make_char_info(9),
+        },
         // id=10 (CYRILLIC): U+0410..=U+044F (Cyrillic block)
         // Covers 'А'(U+0410)
-        CharRange { lo: 0x0410, hi: 0x044F, info: make_char_info(10) },
+        CharRange {
+            lo: 0x0410,
+            hi: 0x044F,
+            info: make_char_info(10),
+        },
     ]
 }
 
@@ -353,12 +401,10 @@ pub fn build_synthetic_dictionary() -> SyntheticDictionary {
 
     // matrix.bin
     let costs = matrix_costs();
-    let matrix = build_matrix_bytes(LSIZE, RSIZE, &costs)
-        .expect("build matrix.bin failed");
+    let matrix = build_matrix_bytes(LSIZE, RSIZE, &costs).expect("build matrix.bin failed");
 
     // char.bin
-    let char_def = build_char_bytes(CATEGORY_NAMES, &char_ranges())
-        .expect("build char.bin failed");
+    let char_def = build_char_bytes(CATEGORY_NAMES, &char_ranges()).expect("build char.bin failed");
 
     // unk.dic (dict_type = 2)
     let unk_entries_data = unk_entries();
@@ -390,14 +436,16 @@ mod tests {
     fn test_unk_dic_type_field() {
         let d = build_synthetic_dictionary();
         // dict_type is at bytes [8..12]
-        let dict_type = u32::from_le_bytes([d.unk_def[8], d.unk_def[9], d.unk_def[10], d.unk_def[11]]);
+        let dict_type =
+            u32::from_le_bytes([d.unk_def[8], d.unk_def[9], d.unk_def[10], d.unk_def[11]]);
         assert_eq!(dict_type, 2, "unk.dic dict_type must be 2 (MECAB_UNK_DIC)");
     }
 
     #[test]
     fn test_sys_dic_type_field() {
         let d = build_synthetic_dictionary();
-        let dict_type = u32::from_le_bytes([d.sys_dic[8], d.sys_dic[9], d.sys_dic[10], d.sys_dic[11]]);
+        let dict_type =
+            u32::from_le_bytes([d.sys_dic[8], d.sys_dic[9], d.sys_dic[10], d.sys_dic[11]]);
         assert_eq!(dict_type, 0, "sys.dic dict_type must be 0 (MECAB_SYS_DIC)");
     }
 
@@ -413,14 +461,22 @@ mod tests {
         let d = build_synthetic_dictionary();
         let csize = CATEGORY_NAMES.len();
         let expected = 4 + csize * 32 + 0xFFFF * 4;
-        assert_eq!(d.char_def.len(), expected, "char.bin must be exactly {expected} bytes");
+        assert_eq!(
+            d.char_def.len(),
+            expected,
+            "char.bin must be exactly {expected} bytes"
+        );
     }
 
     #[test]
     fn test_load_dictionary() {
         let d = build_synthetic_dictionary();
         let dict = d.load();
-        assert!(dict.is_ok(), "dictionary load must succeed: {:?}", dict.err());
+        assert!(
+            dict.is_ok(),
+            "dictionary load must succeed: {:?}",
+            dict.err()
+        );
     }
 
     #[test]

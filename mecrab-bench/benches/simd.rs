@@ -160,7 +160,9 @@ fn bench_argmin_i64(c: &mut Criterion) {
 
     for &batch_size in &[4usize, 8, 16, 64, 256] {
         let prev: Vec<i64> = (0..batch_size as i64).map(|i| 1000 + i * 37).collect();
-        let conn: Vec<i32> = (0..batch_size as i32).map(|i| 100 + (i * 13) % 500).collect();
+        let conn: Vec<i32> = (0..batch_size as i32)
+            .map(|i| 100 + (i * 13) % 500)
+            .collect();
         let wcost: i64 = 200;
         let best_so_far: i64 = i64::MAX / 2;
 

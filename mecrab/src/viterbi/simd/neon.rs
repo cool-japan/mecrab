@@ -195,8 +195,7 @@ pub mod neon_impl {
 #[cfg(target_arch = "aarch64")]
 pub mod neon_i64 {
     use core::arch::aarch64::{
-        int32x2_t, int64x2_t, vaddq_s64, vcgtq_s64, vbslq_s64, vgetq_lane_s64, vmovl_s32,
-        vld1_s32,
+        int32x2_t, int64x2_t, vaddq_s64, vbslq_s64, vcgtq_s64, vgetq_lane_s64, vld1_s32, vmovl_s32,
     };
 
     /// NEON-accelerated `batch_min_argmin_i64`.
@@ -233,18 +232,14 @@ pub mod neon_i64 {
         let simd_min: i64 = if chunks2 > 0 {
             // SAFETY: pointers valid for ≥ 2 elements (chunks2 ≥ 1).
             // vld1_s32 loads 2 × i32; vmovl_s32 sign-extends to 2 × i64.
-            let p0: int64x2_t = unsafe {
-                core::arch::aarch64::vld1q_s64(ptr_p)
-            };
+            let p0: int64x2_t = unsafe { core::arch::aarch64::vld1q_s64(ptr_p) };
             let c_narrow: int32x2_t = unsafe { vld1_s32(ptr_c) };
             let c0: int64x2_t = vmovl_s32(c_narrow);
             let mut lane_min: int64x2_t = vaddq_s64(p0, c0);
 
             for chunk in 1..chunks2 {
                 // SAFETY: chunk < chunks2 ≤ len/2, offsets in-bounds.
-                let pv: int64x2_t = unsafe {
-                    core::arch::aarch64::vld1q_s64(ptr_p.add(chunk * 2))
-                };
+                let pv: int64x2_t = unsafe { core::arch::aarch64::vld1q_s64(ptr_p.add(chunk * 2)) };
                 let cn: int32x2_t = unsafe { vld1_s32(ptr_c.add(chunk * 2)) };
                 let cv: int64x2_t = vmovl_s32(cn);
                 let sv: int64x2_t = vaddq_s64(pv, cv);
@@ -297,7 +292,11 @@ pub mod neon_i64 {
             }
         }
 
-        if found { Some((best_idx, best_total)) } else { None }
+        if found {
+            Some((best_idx, best_total))
+        } else {
+            None
+        }
     }
 }
 

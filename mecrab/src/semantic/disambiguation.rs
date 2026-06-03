@@ -317,7 +317,11 @@ mod tests {
         // Both context word overlap AND topic hint are applied cumulatively.
         // Tokyo at 0.65: (0.65 + 0.1) * 1.3 = 0.975 > OtherCity at 0.8
         let candidates = vec![
-            make_entry("http://dbpedia.org/resource/Tokyo", 0.65, OntologySource::DBpedia),
+            make_entry(
+                "http://dbpedia.org/resource/Tokyo",
+                0.65,
+                OntologySource::DBpedia,
+            ),
             make_entry("http://example.org/OtherCity", 0.8, OntologySource::Custom),
         ];
         let mut ctx = DisambiguationContext::new();

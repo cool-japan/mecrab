@@ -115,11 +115,7 @@ fn bunsetsu_type_from_pos(pos: &str) -> BunsetsuType {
 
 /// Extract the top-level POS tag (field 0 of the comma-separated feature string).
 fn top_pos(morpheme: &Morpheme) -> &str {
-    morpheme
-        .feature
-        .split(',')
-        .next()
-        .unwrap_or("*")
+    morpheme.feature.split(',').next().unwrap_or("*")
 }
 
 // ── BunsetsuChunker ──────────────────────────────────────────────────────────
@@ -256,7 +252,12 @@ mod tests {
             make_morpheme("は", "助詞,係助詞,*,*,*,*,は,ハ,ワ", 3, 6),
             make_morpheme("本", "名詞,一般,*,*,*,*,本,ホン,ホン", 6, 9),
             make_morpheme("を", "助詞,格助詞,一般,*,*,*,を,ヲ,ヲ", 9, 12),
-            make_morpheme("読む", "動詞,自立,*,*,五段・マ行,基本形,読む,ヨム,ヨム", 12, 24),
+            make_morpheme(
+                "読む",
+                "動詞,自立,*,*,五段・マ行,基本形,読む,ヨム,ヨム",
+                12,
+                24,
+            ),
         ];
         let chunks = BunsetsuChunker::chunk(&morphemes);
         assert_eq!(chunks.len(), 3);
@@ -291,9 +292,19 @@ mod tests {
     #[test]
     fn test_punctuation_singleton() {
         let morphemes = vec![
-            make_morpheme("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ", 0, 6),
+            make_morpheme(
+                "東京",
+                "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+                0,
+                6,
+            ),
             make_morpheme("。", "記号,句点,*,*,*,*,。,。,。", 6, 9),
-            make_morpheme("大阪", "名詞,固有名詞,地域,一般,*,*,大阪,オオサカ,オオサカ", 9, 15),
+            make_morpheme(
+                "大阪",
+                "名詞,固有名詞,地域,一般,*,*,大阪,オオサカ,オオサカ",
+                9,
+                15,
+            ),
         ];
         let chunks = BunsetsuChunker::chunk(&morphemes);
         assert_eq!(chunks.len(), 3);
@@ -306,8 +317,18 @@ mod tests {
     #[test]
     fn test_auxiliary_verb_attaches() {
         let morphemes = vec![
-            make_morpheme("行き", "動詞,自立,*,*,五段・カ行促音便,連用形,行く,イキ,イキ", 0, 6),
-            make_morpheme("ます", "助動詞,*,*,*,特殊・マス,基本形,ます,マス,マス", 6, 12),
+            make_morpheme(
+                "行き",
+                "動詞,自立,*,*,五段・カ行促音便,連用形,行く,イキ,イキ",
+                0,
+                6,
+            ),
+            make_morpheme(
+                "ます",
+                "助動詞,*,*,*,特殊・マス,基本形,ます,マス,マス",
+                6,
+                12,
+            ),
         ];
         let chunks = BunsetsuChunker::chunk(&morphemes);
         assert_eq!(chunks.len(), 1);
@@ -319,7 +340,12 @@ mod tests {
     #[test]
     fn test_byte_spans() {
         let morphemes = vec![
-            make_morpheme("東京", "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ", 0, 6),
+            make_morpheme(
+                "東京",
+                "名詞,固有名詞,地域,一般,*,*,東京,トウキョウ,トウキョウ",
+                0,
+                6,
+            ),
             make_morpheme("に", "助詞,格助詞,一般,*,*,*,に,ニ,ニ", 6, 9),
         ];
         let chunks = BunsetsuChunker::chunk(&morphemes);
@@ -344,7 +370,12 @@ mod tests {
         let morphemes = vec![
             make_morpheme("猫", "名詞,一般,*,*,*,*,猫,ネコ,ネコ", 0, 3),
             make_morpheme("が", "助詞,格助詞,一般,*,*,*,が,ガ,ガ", 3, 6),
-            make_morpheme("走る", "動詞,自立,*,*,五段・ラ行,基本形,走る,ハシル,ハシル", 6, 18),
+            make_morpheme(
+                "走る",
+                "動詞,自立,*,*,五段・ラ行,基本形,走る,ハシル,ハシル",
+                6,
+                18,
+            ),
         ];
         let chunks = BunsetsuChunker::chunk(&morphemes);
         assert_eq!(chunks.len(), 2);

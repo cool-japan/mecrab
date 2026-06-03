@@ -83,9 +83,9 @@
 //! mecrab.addWord("ChatGPT", "チャットジーピーティー", "チャットジーピーティー", 5000);
 //! ```
 
+mod core;
 mod format;
 mod loader;
-mod core;
 mod parse_impl;
 
 pub use core::MeCrabWasm;
@@ -113,8 +113,8 @@ pub fn features() -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::loader::{BLOB_MAGIC, HEADER_BYTES};
+    use super::*;
 
     // Re-expose parse_blob under the name used by the original tests so that
     // every `MeCrabWasm::parse_blob(...)` call compiles without changes.

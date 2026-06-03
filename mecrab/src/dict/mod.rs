@@ -315,7 +315,10 @@ impl Dictionary {
 
         // Apply word-cost overrides when active
         if has_overrides {
-            let overrides = self.word_cost_overrides.read().unwrap_or_else(|e| e.into_inner());
+            let overrides = self
+                .word_cost_overrides
+                .read()
+                .unwrap_or_else(|e| e.into_inner());
             for entry in &mut results {
                 if let Some(&delta) = overrides.get(&entry.word_id) {
                     let updated = entry.wcost as i64 + delta as i64;
@@ -336,7 +339,10 @@ impl Dictionary {
     /// Passing an empty map clears all overrides and re-enables the fast path.
     pub fn set_word_cost_overrides(&self, overrides: HashMap<u32, i16>) {
         let len = overrides.len();
-        *self.word_cost_overrides.write().unwrap_or_else(|e| e.into_inner()) = overrides;
+        *self
+            .word_cost_overrides
+            .write()
+            .unwrap_or_else(|e| e.into_inner()) = overrides;
         self.override_count.store(len, Ordering::Release);
     }
 
@@ -359,18 +365,18 @@ impl Dictionary {
                 continue;
             }
             let mut parts = trimmed.splitn(2, '\t');
-            let wid_str = parts.next().ok_or_else(|| {
-                Error::IoError(format!("line {}: missing word_id", line_no + 1))
-            })?;
-            let delta_str = parts.next().ok_or_else(|| {
-                Error::IoError(format!("line {}: missing delta", line_no + 1))
-            })?;
+            let wid_str = parts
+                .next()
+                .ok_or_else(|| Error::IoError(format!("line {}: missing word_id", line_no + 1)))?;
+            let delta_str = parts
+                .next()
+                .ok_or_else(|| Error::IoError(format!("line {}: missing delta", line_no + 1)))?;
             let word_id: u32 = wid_str.parse().map_err(|e| {
                 Error::IoError(format!("line {}: invalid word_id: {e}", line_no + 1))
             })?;
-            let delta: i16 = delta_str.parse().map_err(|e| {
-                Error::IoError(format!("line {}: invalid delta: {e}", line_no + 1))
-            })?;
+            let delta: i16 = delta_str
+                .parse()
+                .map_err(|e| Error::IoError(format!("line {}: invalid delta: {e}", line_no + 1)))?;
             map.insert(word_id, delta);
         }
         self.set_word_cost_overrides(map);
@@ -588,7 +594,10 @@ mod tests {
             "lookup length must be identical after clearing overrides"
         );
         for (a, b) in base.iter().zip(after_clear.iter()) {
-            assert_eq!(a.wcost, b.wcost, "wcost must be unchanged after clearing overrides");
+            assert_eq!(
+                a.wcost, b.wcost,
+                "wcost must be unchanged after clearing overrides"
+            );
             assert_eq!(a.word_id, b.word_id);
         }
     }
@@ -609,13 +618,15 @@ mod tests {
         }
         let target = base[0].clone();
         let delta: i16 = -200;
-        let expected_wcost = (target.wcost as i64 + delta as i64)
-            .clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+        let expected_wcost =
+            (target.wcost as i64 + delta as i64).clamp(i16::MIN as i64, i16::MAX as i64) as i16;
 
         dict.set_word_cost_overrides(HashMap::from([(target.word_id, delta)]));
         let after = dict.lookup("すもも");
 
-        let overridden = after.iter().find(|e| e.word_id == target.word_id)
+        let overridden = after
+            .iter()
+            .find(|e| e.word_id == target.word_id)
             .expect("overridden word must still appear in results");
         assert_eq!(
             overridden.wcost, expected_wcost,
@@ -627,7 +638,10 @@ mod tests {
             if e.word_id != target.word_id {
                 let base_entry = base.iter().find(|b| b.word_id == e.word_id);
                 if let Some(b) = base_entry {
-                    assert_eq!(e.wcost, b.wcost, "unaffected word_id must keep original wcost");
+                    assert_eq!(
+                        e.wcost, b.wcost,
+                        "unaffected word_id must keep original wcost"
+                    );
                 }
             }
         }
@@ -651,7 +665,8 @@ mod tests {
             writeln!(f, "42\t-100").unwrap();
             writeln!(f, "99\t200").unwrap();
         }
-        dict.load_word_cost_overrides(&path).expect("load_word_cost_overrides");
+        dict.load_word_cost_overrides(&path)
+            .expect("load_word_cost_overrides");
         assert_eq!(dict.override_count.load(Ordering::Acquire), 2);
         {
             let map = dict.word_cost_overrides.read().unwrap();
