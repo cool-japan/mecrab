@@ -7,7 +7,7 @@
 //! - `WikidataEntry` surface extraction and type-filtering helpers
 //! - Streaming + chunked parallel parse helpers used by `WikidataProcessor`
 
-use flate2::read::GzDecoder;
+use oxiarc_deflate::GzipStreamDecoder;
 use rayon::prelude::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -206,7 +206,7 @@ pub fn parse_wikidata_dump(
 
     let file = File::open(path)?;
     let reader: Box<dyn BufRead> = if path.extension().is_some_and(|e| e == "gz") {
-        Box::new(BufReader::new(GzDecoder::new(file)))
+        Box::new(BufReader::new(GzipStreamDecoder::new(file)))
     } else {
         Box::new(BufReader::new(file))
     };
@@ -329,7 +329,7 @@ pub fn parse_wikidata_dump_streaming(
         let reader: Box<dyn std::io::BufRead + Send> = if gz_ext {
             Box::new(std::io::BufReader::with_capacity(
                 1 << 20,
-                flate2::read::GzDecoder::new(file),
+                GzipStreamDecoder::new(file),
             ))
         } else {
             Box::new(std::io::BufReader::with_capacity(1 << 20, file))

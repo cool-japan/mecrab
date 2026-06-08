@@ -29,8 +29,8 @@ reqwest.workspace = true
 # Async utilities
 futures.workspace = true
 
-# Compression (gzip streaming)
-flate2.workspace = true
+# Compression (gzip streaming) — Pure Rust via OxiARC
+oxiarc-deflate.workspace = true
 
 # Serialization
 serde.workspace = true

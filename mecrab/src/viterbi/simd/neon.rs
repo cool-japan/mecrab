@@ -248,11 +248,9 @@ pub mod neon_i64 {
                 let gt_mask = vcgtq_s64(lane_min, sv);
                 // vbslq_s64(mask, a, b) selects a where mask is all-ones, b elsewhere.
                 // When lane_min > sv, we want sv (smaller), so: select sv where gt.
-                lane_min = vbslq_s64(
-                    core::mem::transmute::<int64x2_t, core::arch::aarch64::uint64x2_t>(gt_mask),
-                    sv,
-                    lane_min,
-                );
+                // `vcgtq_s64` already yields a `uint64x2_t` mask, which is exactly
+                // what `vbslq_s64` expects — no transmute required.
+                lane_min = vbslq_s64(gt_mask, sv, lane_min);
             }
 
             // Horizontal reduce: min of lane 0 and lane 1.

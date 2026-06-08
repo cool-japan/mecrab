@@ -220,6 +220,12 @@ pub fn find_best_predecessor(prev_costs: &[i32], connection_costs: &[i16]) -> Op
 /// - **wasm32 + simd128**: 2-lane i64x2 SIMD via WebAssembly SIMD128.
 /// - **other**: scalar reference implementation.
 #[inline]
+// `return` is required on the per-architecture branches below: each `cfg`
+// block is followed by further `cfg`-gated blocks, so an early return is the
+// only way to share a single function body across all target architectures.
+// On any one architecture exactly one branch is compiled, which makes its
+// `return` look "needless" to Clippy — hence the targeted allow.
+#[allow(clippy::needless_return)]
 pub fn batch_min_argmin_i64(
     prev: &[i64],
     conn: &[i32],

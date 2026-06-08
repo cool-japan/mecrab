@@ -10,7 +10,7 @@
 
 use crate::wikidata::WikidataIndex;
 use crate::{BuildError, Result};
-use flate2::read::GzDecoder;
+use oxiarc_deflate::GzipStreamDecoder;
 use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -102,7 +102,10 @@ impl DBpediaProcessor {
         let file = std::fs::File::open(path).map_err(BuildError::Io)?;
 
         let reader: Box<dyn BufRead> = if path.extension().is_some_and(|e| e == "gz") {
-            Box::new(BufReader::with_capacity(1 << 20, GzDecoder::new(file)))
+            Box::new(BufReader::with_capacity(
+                1 << 20,
+                GzipStreamDecoder::new(file),
+            ))
         } else {
             Box::new(BufReader::with_capacity(1 << 20, file))
         };

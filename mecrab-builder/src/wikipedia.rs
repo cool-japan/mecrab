@@ -14,7 +14,7 @@
 
 use crate::wikidata::WikidataIndex;
 use crate::{BuildError, Result};
-use flate2::read::GzDecoder;
+use oxiarc_deflate::GzipStreamDecoder;
 use rayon::prelude::*;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -73,7 +73,10 @@ impl WikipediaProcessor {
         // Open file (handle .gz)
         let file = std::fs::File::open(path)?;
         let reader: Box<dyn BufRead> = if path.extension().is_some_and(|e| e == "gz") {
-            Box::new(BufReader::with_capacity(1 << 20, GzDecoder::new(file)))
+            Box::new(BufReader::with_capacity(
+                1 << 20,
+                GzipStreamDecoder::new(file),
+            ))
         } else {
             Box::new(BufReader::with_capacity(1 << 20, file))
         };
@@ -357,6 +360,46 @@ mod tests {
         // "テスト記事" should be in index
         let results = index.lookup("テスト記事");
         assert!(results.is_some());
+
+        std::fs::remove_file(&path).ok();
+    }
+
+    /// Exercises the gzip (`.gz`) decompression branch end-to-end through the
+    /// Pure-Rust `oxiarc_deflate::GzipStreamDecoder` (the flate2 replacement).
+    ///
+    /// The dump is compressed with `oxiarc_deflate::gzip_compress`, written to
+    /// a `.gz` file, then decoded by `process_dump`, proving the streaming
+    /// decoder round-trips real gzip data.
+    #[test]
+    fn test_process_dump_gzip_roundtrip() {
+        let xml = r#"<feed>
+<doc>
+<title>Wikipedia: テスト記事</title>
+<url>http://ja.wikipedia.org/wiki/テスト記事</url>
+<abstract>テスト記事（てすときじ）は、テストのための記事です。テストテストテストテストテスト。</abstract>
+</doc>
+</feed>"#;
+
+        // Compress with the same Pure-Rust crate used for decoding.
+        let compressed =
+            oxiarc_deflate::gzip_compress(xml.as_bytes(), 6).expect("gzip_compress failed");
+
+        let dir = std::env::temp_dir();
+        let path = dir.join("test_mecrab_wiki_abstract_roundtrip.xml.gz");
+        std::fs::write(&path, &compressed).expect("failed to write temp .gz file");
+
+        let processor = WikipediaProcessor::new();
+        let mut index = WikidataIndex::default();
+        let stats = processor
+            .process_dump(&path, &mut index, false)
+            .expect("process_dump on .gz failed");
+
+        assert_eq!(stats.articles_processed, 1);
+        assert!(stats.surfaces_added > 0);
+
+        // The decompressed content must have been parsed correctly.
+        let results = index.lookup("テスト記事");
+        assert!(results.is_some(), "surface from .gz dump should be indexed");
 
         std::fs::remove_file(&path).ok();
     }
