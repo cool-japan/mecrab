@@ -532,8 +532,11 @@ fn expand_template(template: &str, morpheme: &crate::Morpheme, out: &mut String)
                 // To avoid breaking multi-byte sequences we consume the full UTF-8
                 // character at position `i`.
                 //
-                // `template` is a valid `&str`; unwrap is safe here.
-                let ch = template[i..].chars().next().unwrap();
+                // `template` is a valid `&str`; the slice always has at least one char here.
+                let ch = template[i..]
+                    .chars()
+                    .next()
+                    .expect("invariant: template[i..] is non-empty at a multi-byte boundary");
                 out.push(ch);
                 i += ch.len_utf8();
                 let _ = b; // suppress unused-variable lint
