@@ -993,11 +993,21 @@ mod tests {
     /// file and return the path.  All IDs appear frequently enough to survive
     /// min_count filtering.
     fn write_tiny_corpus() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = std::env::temp_dir().join(format!("mecrab_trainer_test_{nanos}.txt"));
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = std::thread::current().id();
+        // Include the process id: under nextest each test runs in its own process
+        // where the main thread is always `ThreadId(1)` and the counter restarts
+        // at 0, so without the pid two processes can collide on the same path.
+        let pid = std::process::id();
+        let path = std::env::temp_dir().join(format!(
+            "mecrab_trainer_test_{pid}_{nanos}_{tid:?}_{uniq}.txt"
+        ));
         // Repeat sentences so every token appears at least 5 times
         let text = "0 1 2 3 4\n1 2 3 4 5\n0 2 4 6 8\n1 3 5 7 9\n0 1 3 5 7\n\
                     2 4 6 8 0\n3 5 7 9 1\n0 3 6 9 2\n1 4 7 0 3\n2 5 8 1 4\n\

@@ -15,12 +15,48 @@
 //! 9. Write `matrix.bin` (and optionally `word_cost.tsv`).
 
 use crate::commands::parse::DictFormatArg;
-use clap::Args;
+use clap::{Args, ValueEnum};
+use mecrab::viterbi::train_loop::Optimizer;
 use mecrab::{
     DictTrainConfig, GoldSegmentation, IpadicProvider, MeCrab, NeologdProvider, UnidicProvider,
     boundary_f1,
 };
 use std::path::{Path, PathBuf};
+
+// ── Optimizer CLI argument ─────────────────────────────────────────────────────
+
+/// CLI argument selecting the adaptive optimizer for dictionary-cost training.
+///
+/// Maps 1-to-1 to [`mecrab::viterbi::train_loop::Optimizer`] but derives
+/// `ValueEnum` so that clap can parse it from the command line (mirroring the
+/// [`DictFormatArg`] pattern).  Variant names are chosen so clap renders them as
+/// `sgd`, `adagrad`, `rmsprop`, `adam`, and `lbfgs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum, Default)]
+pub enum OptimizerArg {
+    /// Plain stochastic gradient descent (default).
+    #[default]
+    Sgd,
+    /// AdaGrad: per-parameter learning-rate annealing.
+    Adagrad,
+    /// RMSProp: exponentially-decayed average of squared gradients.
+    Rmsprop,
+    /// Adam: bias-corrected first/second moment estimates.
+    Adam,
+    /// Batch L-BFGS (OWL-QN when `--l1` > 0): full-batch second-order fit.
+    Lbfgs,
+}
+
+impl From<OptimizerArg> for Optimizer {
+    fn from(arg: OptimizerArg) -> Self {
+        match arg {
+            OptimizerArg::Sgd => Optimizer::Sgd,
+            OptimizerArg::Adagrad => Optimizer::AdaGrad,
+            OptimizerArg::Rmsprop => Optimizer::RmsProp,
+            OptimizerArg::Adam => Optimizer::Adam,
+            OptimizerArg::Lbfgs => Optimizer::Lbfgs,
+        }
+    }
+}
 
 // ── CLI arguments ────────────────────────────────────────────────────────────
 
@@ -72,6 +108,41 @@ pub struct TrainArgs {
     /// L2 regularization strength.
     #[arg(long = "l2", default_value_t = 1e-5)]
     pub l2_strength: f64,
+
+    /// Optimizer for parameter updates: sgd (default), adagrad, rmsprop, adam.
+    #[arg(long, value_enum, default_value_t = OptimizerArg::Sgd)]
+    pub optimizer: OptimizerArg,
+
+    /// Numerical-stability epsilon for adaptive optimizers (adagrad/rmsprop/adam).
+    #[arg(long, default_value_t = 1e-8)]
+    pub epsilon: f64,
+
+    /// RMSProp squared-gradient decay rate.
+    #[arg(long = "rmsprop-decay", default_value_t = 0.9)]
+    pub rmsprop_decay: f64,
+
+    /// Adam first-moment decay (beta1).
+    #[arg(long = "adam-beta1", default_value_t = 0.9)]
+    pub adam_beta1: f64,
+
+    /// Adam second-moment decay (beta2).
+    #[arg(long = "adam-beta2", default_value_t = 0.999)]
+    pub adam_beta2: f64,
+
+    /// Recompute the CRF gradient under the current (evolving) model each epoch
+    /// — a true iterative CRF fit.  Off by default (the gradient is computed
+    /// once under the initial dictionary, matching prior behaviour).
+    #[arg(long)]
+    pub iterative: bool,
+
+    /// `L1` (OWL-QN) regularization strength for `--optimizer lbfgs`.
+    /// 0 = plain L-BFGS with `--l2` only.
+    #[arg(long = "l1", default_value_t = 0.0)]
+    pub l1_strength: f64,
+
+    /// L-BFGS history size (retained curvature pairs) for `--optimizer lbfgs`.
+    #[arg(long = "lbfgs-memory", default_value_t = 8)]
+    pub lbfgs_memory: usize,
 
     /// Output path for the trained matrix.bin (default: <dicdir>/matrix.bin).
     #[arg(long)]
@@ -303,12 +374,24 @@ pub fn run_train(args: TrainArgs) -> Result<(), Box<dyn std::error::Error>> {
         epochs: args.epochs,
         l2_strength: args.l2_strength,
         verbose: args.verbose,
+        optimizer: args.optimizer.into(),
+        epsilon: args.epsilon,
+        rmsprop_decay: args.rmsprop_decay,
+        adam_beta1: args.adam_beta1,
+        adam_beta2: args.adam_beta2,
+        iterative: args.iterative,
+        l1_strength: args.l1_strength,
+        lbfgs_memory: args.lbfgs_memory,
     };
 
     // ------------------------------------------------------------------
     // 6. Run training.
     // ------------------------------------------------------------------
     eprintln!("Training for {} epoch(s)...", args.epochs);
+    eprintln!("Optimizer: {:?}", config.optimizer);
+    if config.iterative {
+        eprintln!("Mode: iterative (gradient recomputed under the evolving model each epoch)");
+    }
     if args.min_learning_rate > 0.0 {
         eprintln!(
             "LR schedule: {:.4} → {:.4} (linear decay)",
@@ -531,6 +614,21 @@ mod tests {
         assert!((r - 0.5).abs() < 1e-9, "recall={r}");
         // F1 = 2*(1.0*0.5)/(1.0+0.5) = 2/3
         assert!((f - 2.0 / 3.0).abs() < 1e-9, "f1={f}");
+    }
+
+    #[test]
+    fn test_optimizer_arg_maps_to_core() {
+        assert_eq!(Optimizer::from(OptimizerArg::Sgd), Optimizer::Sgd);
+        assert_eq!(Optimizer::from(OptimizerArg::Adagrad), Optimizer::AdaGrad);
+        assert_eq!(Optimizer::from(OptimizerArg::Rmsprop), Optimizer::RmsProp);
+        assert_eq!(Optimizer::from(OptimizerArg::Adam), Optimizer::Adam);
+        assert_eq!(Optimizer::from(OptimizerArg::Lbfgs), Optimizer::Lbfgs);
+    }
+
+    #[test]
+    fn test_optimizer_arg_default_is_sgd() {
+        assert_eq!(OptimizerArg::default(), OptimizerArg::Sgd);
+        assert_eq!(Optimizer::from(OptimizerArg::default()), Optimizer::Sgd);
     }
 
     #[test]

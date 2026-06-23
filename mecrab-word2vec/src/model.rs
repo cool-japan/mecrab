@@ -784,13 +784,23 @@ mod tests {
     use std::io::Write;
 
     fn temp_path(stem: &str, ext: &str) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        // Include thread ID to prevent collisions between parallel test threads.
+        // Process id + a process-local atomic counter make the path globally
+        // unique. Thread id alone is insufficient under nextest, which runs each
+        // test in its own process where the main thread is always `ThreadId(1)`,
+        // so two processes hitting the same nanosecond would otherwise collide and
+        // truncate each other's corpus mid-train.
+        let pid = std::process::id();
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
         let tid = std::thread::current().id();
-        std::env::temp_dir().join(format!("mecrab_model_{stem}_{nanos}_{tid:?}.{ext}"))
+        std::env::temp_dir().join(format!(
+            "mecrab_model_{stem}_{pid}_{nanos}_{tid:?}_{uniq}.{ext}"
+        ))
     }
 
     fn make_corpus(sentences: &[&str]) -> std::path::PathBuf {

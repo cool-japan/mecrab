@@ -72,13 +72,24 @@ mod integration_tests {
     use std::io::Write;
 
     /// Write sentences to a temporary file and return its path.
+    ///
+    /// The file name combines a timestamp, the current thread id, and a
+    /// process-wide atomic counter so that parallel test threads (and repeated
+    /// calls on one thread) can never collide on the same path.
     fn make_corpus_file(sentences: &[&str]) -> std::path::PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
         let dir = std::env::temp_dir();
         let nanos = std::time::SystemTime::now()
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = dir.join(format!("mecrab_w2v_test_{nanos}.txt"));
+        let uniq = COUNTER.fetch_add(1, Ordering::Relaxed);
+        let tid = std::thread::current().id();
+        // pid distinguishes nextest's per-test processes (where tid is always
+        // `ThreadId(1)` and the counter restarts at 0).
+        let pid = std::process::id();
+        let path = dir.join(format!("mecrab_w2v_test_{pid}_{nanos}_{tid:?}_{uniq}.txt"));
         let mut f = std::fs::File::create(&path).expect("create temp corpus file");
         for s in sentences {
             writeln!(f, "{s}").expect("write sentence");
@@ -204,7 +215,8 @@ mod integration_tests {
             .expect("train_from_file");
 
         let out_path = std::env::temp_dir().join(format!(
-            "mecrab_w2v_text_{}.txt",
+            "mecrab_w2v_text_{}_{}.txt",
+            std::process::id(),
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)
                 .map(|d| d.as_nanos())
@@ -538,7 +550,10 @@ mod integration_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let subword_path = dir.join(format!("mecrab_subword_test_{nanos}.subword"));
+        let subword_path = dir.join(format!(
+            "mecrab_subword_test_{}_{nanos}.subword",
+            std::process::id()
+        ));
         model
             .save_subword_text(&subword_path)
             .expect("save_subword_text");
@@ -589,7 +604,10 @@ mod integration_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .map(|d| d.as_nanos())
             .unwrap_or(0);
-        let path = dir.join(format!("mecrab_subword_noop_{nanos}.subword"));
+        let path = dir.join(format!(
+            "mecrab_subword_noop_{}_{nanos}.subword",
+            std::process::id()
+        ));
         // Should silently do nothing (no subword config set)
         model
             .save_subword_text(&path)
@@ -631,7 +649,10 @@ mod integration_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let corpus_path = tmp_dir.join(format!("mecrab_cbow_test_{nanos}.txt"));
+        let corpus_path = tmp_dir.join(format!(
+            "mecrab_cbow_test_{}_{nanos}.txt",
+            std::process::id()
+        ));
         {
             let mut f = std::fs::File::create(&corpus_path).expect("create cbow test corpus");
             for _ in 0..20 {
@@ -660,7 +681,10 @@ mod integration_tests {
             .duration_since(std::time::UNIX_EPOCH)
             .unwrap_or_default()
             .subsec_nanos();
-        let corpus_path2 = std::env::temp_dir().join(format!("mecrab_cbow_test2_{nanos2}.txt"));
+        let corpus_path2 = std::env::temp_dir().join(format!(
+            "mecrab_cbow_test2_{}_{nanos2}.txt",
+            std::process::id()
+        ));
         {
             let mut f = std::fs::File::create(&corpus_path2).expect("create cbow test corpus 2");
             for _ in 0..20 {

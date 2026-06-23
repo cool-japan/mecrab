@@ -503,3 +503,230 @@ fn test_constrained_forced_span_with_custom_feature() {
         sumomo.feature
     );
 }
+
+// ── Iterative (evolving-cost) CRF training ──────────────────────────────────────
+
+/// Gold corpus for the classic test sentence, segmented as the synthetic lexicon
+/// expects: すもも / も / もも / も / もも / の / うち.  Four identical copies make
+/// the per-batch summed gradient large enough to produce non-zero integer cost
+/// updates (visible movement) in a single batch.
+fn sumomo_gold() -> Vec<mecrab::GoldSegmentation> {
+    let text = "すもももももももものうち";
+    let tsv = "すもも\nも\nもも\nも\nもも\nの\nうち\nEOS\n";
+    let g = mecrab::GoldSegmentation::from_mecab_tsv(text, tsv).expect("gold parse");
+    vec![g.clone(), g.clone(), g.clone(), g]
+}
+
+/// With one epoch and a single batch, the gradient is computed on the pristine
+/// matrix (empty deltas), where `MatrixCostSource` is bit-identical to
+/// `DictCostSource`.  So `--iterative` and the default must produce byte-for-byte
+/// identical trained parameters and identical epoch-0 loss.
+#[test]
+fn iterative_single_step_is_bit_identical_to_noniterative() {
+    let d = build_synthetic_dictionary();
+    let mecrab = mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("synthetic dict load failed");
+    let corpus = sumomo_gold();
+
+    let base = mecrab::DictTrainConfig {
+        epochs: 1,
+        batch_size: 64,
+        learning_rate: 1.0,
+        l2_strength: 0.0,
+        ..Default::default()
+    };
+    let (m_non, s_non) = mecrab
+        .train_dict(
+            &corpus,
+            &mecrab::DictTrainConfig {
+                iterative: false,
+                ..base.clone()
+            },
+        )
+        .expect("non-iterative train");
+    let (m_itr, s_itr) = mecrab
+        .train_dict(
+            &corpus,
+            &mecrab::DictTrainConfig {
+                iterative: true,
+                ..base
+            },
+        )
+        .expect("iterative train");
+
+    assert_eq!(
+        m_non.to_bytes(),
+        m_itr.to_bytes(),
+        "iterative epoch-0 single-batch must be bit-identical to non-iterative"
+    );
+    assert_eq!(
+        m_non.word_cost_deltas_i16(),
+        m_itr.word_cost_deltas_i16(),
+        "word-cost deltas must match on the first step"
+    );
+    assert!(
+        (s_non.epoch_stats[0].loss - s_itr.epoch_stats[0].loss).abs() < 1e-9,
+        "epoch-0 loss must be identical: {} vs {}",
+        s_non.epoch_stats[0].loss,
+        s_itr.epoch_stats[0].loss
+    );
+}
+
+/// The correctness proof for evolving-cost training: the legacy path computes the
+/// gradient under the *fixed* dictionary every epoch, so its per-epoch loss is
+/// exactly constant (it never reflects its own updates).  `--iterative` recomputes
+/// expected counts under the evolving model, so the loss actually moves — and the
+/// gold segmentation becomes strictly more probable.
+#[test]
+fn iterative_evolves_gradient_noniterative_is_flat() {
+    let d = build_synthetic_dictionary();
+    let mecrab = mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("synthetic dict load failed");
+    let corpus = sumomo_gold();
+
+    let base = mecrab::DictTrainConfig {
+        epochs: 6,
+        batch_size: 64,
+        learning_rate: 1.0,
+        l2_strength: 0.0,
+        ..Default::default()
+    };
+    let (m_non, s_non) = mecrab
+        .train_dict(
+            &corpus,
+            &mecrab::DictTrainConfig {
+                iterative: false,
+                ..base.clone()
+            },
+        )
+        .expect("non-iterative train");
+    let (m_itr, s_itr) = mecrab
+        .train_dict(
+            &corpus,
+            &mecrab::DictTrainConfig {
+                iterative: true,
+                ..base
+            },
+        )
+        .expect("iterative train");
+
+    let n0 = s_non.epoch_stats.first().expect("epochs").loss;
+    let nlast = s_non.epoch_stats.last().expect("epochs").loss;
+    let i0 = s_itr.epoch_stats.first().expect("epochs").loss;
+    let ilast = s_itr.epoch_stats.last().expect("epochs").loss;
+
+    // Smoking gun: legacy per-epoch loss is exactly constant.
+    assert!(
+        (n0 - nlast).abs() < 1e-9,
+        "non-iterative loss must be flat across epochs: {n0} → {nlast}"
+    );
+    // Both compute epoch-0 loss on the pristine model ⇒ identical start.
+    assert!(
+        (n0 - i0).abs() < 1e-9,
+        "epoch-0 loss must match between modes: {n0} vs {i0}"
+    );
+    // Iterative loss genuinely moves and improves the gold fit.
+    assert!(
+        (i0 - ilast).abs() > 1e-6,
+        "iterative loss must change across epochs: {i0} → {ilast}"
+    );
+    assert!(
+        ilast < i0,
+        "iterative training must reduce gold NLL: {i0} → {ilast}"
+    );
+    // The evolving gradient drives the model to a different fit. The connection
+    // matrix may stay put when its integer-rounded gradient is zero (the gold
+    // connections are already preferred), so assert on the f64 word-cost deltas,
+    // which genuinely diverge once the gradient is recomputed under the updated
+    // model.
+    assert!(
+        m_non.word_cost_deltas != m_itr.word_cost_deltas,
+        "iterative training must evolve the model differently from fixed-gradient"
+    );
+}
+
+// ── Batch L-BFGS / OWL-QN CRF training ──────────────────────────────────────────
+
+/// Batch L-BFGS fits the CRF costs as a single smooth optimization. Starting from
+/// the dictionary (`x = 0`) it must drive the regularized NLL strictly down and
+/// leave every fitted parameter finite. (`epochs` bounds the L-BFGS iterations;
+/// `epochs = 0` just evaluates the untrained objective.)
+#[test]
+fn lbfgs_training_reduces_objective_and_is_finite() {
+    let d = build_synthetic_dictionary();
+    let mecrab = mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("synthetic dict load failed");
+    let corpus = sumomo_gold();
+
+    let base = mecrab::DictTrainConfig {
+        optimizer: mecrab::viterbi::train_loop::Optimizer::Lbfgs,
+        l2_strength: 1e-4,
+        ..Default::default()
+    };
+    let (_m0, s0) = mecrab
+        .train_dict(
+            &corpus,
+            &mecrab::DictTrainConfig {
+                epochs: 0,
+                ..base.clone()
+            },
+        )
+        .expect("lbfgs init eval");
+    let (m, s) = mecrab
+        .train_dict(&corpus, &mecrab::DictTrainConfig { epochs: 40, ..base })
+        .expect("lbfgs fit");
+
+    let initial = s0.epoch_stats.first().expect("init stat").loss;
+    let fitted = s.epoch_stats.first().expect("fit stat").loss;
+    assert!(
+        initial.is_finite() && fitted.is_finite(),
+        "objective must be finite: {initial} → {fitted}"
+    );
+    assert!(
+        fitted < initial,
+        "L-BFGS must reduce the regularized NLL: {initial} → {fitted}"
+    );
+    assert!(s.total_epochs >= 1, "L-BFGS must take at least one step");
+    for delta in m.word_cost_deltas.values() {
+        assert!(delta.is_finite(), "fitted word-cost deltas must be finite");
+    }
+}
+
+/// OWL-QN (L-BFGS with an `L1` term) integrates end-to-end: it runs to a finite,
+/// non-increasing objective and leaves finite deltas. (OWL-QN's sparsity/soft-
+/// threshold correctness is proven separately by the `lbfgs` unit tests.)
+#[test]
+fn owlqn_l1_training_runs_finite() {
+    let d = build_synthetic_dictionary();
+    let mecrab = mecrab::MeCrab::from_bytes(&d.sys_dic, &d.matrix, &d.char_def, &d.unk_def)
+        .expect("synthetic dict load failed");
+    let corpus = sumomo_gold();
+
+    let base = mecrab::DictTrainConfig {
+        optimizer: mecrab::viterbi::train_loop::Optimizer::Lbfgs,
+        l2_strength: 1e-4,
+        l1_strength: 1e-5,
+        ..Default::default()
+    };
+    let (_m0, s0) = mecrab
+        .train_dict(
+            &corpus,
+            &mecrab::DictTrainConfig {
+                epochs: 0,
+                ..base.clone()
+            },
+        )
+        .expect("owlqn init");
+    let (m, s) = mecrab
+        .train_dict(&corpus, &mecrab::DictTrainConfig { epochs: 40, ..base })
+        .expect("owlqn fit");
+    let initial = s0.epoch_stats.first().expect("init").loss;
+    let fitted = s.epoch_stats.first().expect("fit").loss;
+    assert!(
+        fitted.is_finite() && fitted <= initial + 1e-9,
+        "owlqn objective must be finite and non-increasing: {initial} → {fitted}"
+    );
+    for delta in m.word_cost_deltas.values() {
+        assert!(delta.is_finite(), "owlqn deltas must be finite");
+    }
+}

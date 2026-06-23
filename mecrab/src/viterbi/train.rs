@@ -23,6 +23,7 @@ use crate::dict::Dictionary;
 use crate::lattice::Lattice;
 use crate::viterbi::ViterbiSolver;
 use crate::viterbi::analysis::LatticeProbTable;
+use crate::viterbi::fb::{DictCostSource, EdgeCostSource};
 
 // ── Gold segmentation types ───────────────────────────────────────────────────
 
@@ -180,6 +181,217 @@ impl CrfGradient {
     }
 }
 
+// ── Optimizer ─────────────────────────────────────────────────────────────────
+
+/// Adaptive gradient-descent optimizer for dictionary-cost training.
+///
+/// Each variant transforms a raw gradient into a per-parameter *step* — the
+/// f64 amount **subtracted** from the parameter (matching the historical
+/// `cost -= lr * grad` sign convention).  [`Optimizer::Sgd`] is the default and
+/// yields `step = lr * grad`, byte-for-byte identical to the original
+/// plain-SGD update path.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum Optimizer {
+    /// Plain stochastic gradient descent: `step = lr · grad`.
+    #[default]
+    Sgd,
+    /// AdaGrad: per-parameter learning-rate annealing via the running sum of
+    /// squared gradients — `G += grad²; step = lr · grad / (√G + ε)`.
+    AdaGrad,
+    /// RMSProp: exponentially-decayed average of squared gradients —
+    /// `G = decay·G + (1-decay)·grad²; step = lr · grad / (√G + ε)`.
+    RmsProp,
+    /// Adam: bias-corrected first and second moment estimates —
+    /// `m = β₁·m + (1-β₁)·grad; v = β₂·v + (1-β₂)·grad²;`
+    /// `step = lr · m̂ / (√v̂ + ε)` with `m̂ = m/(1-β₁ᵗ)`, `v̂ = v/(1-β₂ᵗ)`.
+    Adam,
+    /// Batch L-BFGS (or OWL-QN when an `L1` strength is set). Unlike the others,
+    /// this is **not** a per-parameter step rule applied in the mini-batch loop —
+    /// it drives a full-batch second-order fit via
+    /// [`train_lbfgs`](crate::viterbi::train_lbfgs), so `train_dict` dispatches to
+    /// a separate code path and the per-step machinery below is never invoked.
+    Lbfgs,
+}
+
+/// Hyperparameters governing an [`OptimizerState`] step.
+///
+/// Bundled so the per-parameter step math stays decoupled from the full
+/// [`DictTrainConfig`](crate::viterbi::train_loop::DictTrainConfig); the latter
+/// produces one of these via `DictTrainConfig::optimizer_config`.
+#[derive(Debug, Clone, Copy)]
+pub struct OptimizerConfig {
+    /// Which optimizer to apply.
+    pub optimizer: Optimizer,
+    /// Numerical-stability constant added to the denominator. Default `1e-8`.
+    pub epsilon: f64,
+    /// RMSProp squared-gradient decay rate. Default `0.9`.
+    pub rmsprop_decay: f64,
+    /// Adam first-moment decay (β₁). Default `0.9`.
+    pub adam_beta1: f64,
+    /// Adam second-moment decay (β₂). Default `0.999`.
+    pub adam_beta2: f64,
+}
+
+impl Default for OptimizerConfig {
+    fn default() -> Self {
+        Self {
+            optimizer: Optimizer::Sgd,
+            epsilon: 1e-8,
+            rmsprop_decay: 0.9,
+            adam_beta1: 0.9,
+            adam_beta2: 0.999,
+        }
+    }
+}
+
+/// Persistent adaptive-optimizer state, keyed per parameter.
+///
+/// One instance is created at the start of a
+/// [`train_dict`](crate::viterbi::train_loop::train_dict) run and threaded
+/// through every batch of every epoch so that AdaGrad accumulation, RMSProp
+/// decay, and Adam moment/timestep state persist across the *entire* run.
+///
+/// Connection-cost parameters are keyed by `(right_id, left_id)`; word-cost
+/// parameters are keyed by `word_id`.  For [`Optimizer::Sgd`] the maps stay
+/// empty and the step reduces to `lr · grad`.
+#[derive(Debug, Clone, Default)]
+pub struct OptimizerState {
+    /// Optimizer this state was constructed for (authoritative for branching).
+    optimizer: Optimizer,
+    /// Second-moment accumulator per connection key:
+    /// AdaGrad `G`, RMSProp decayed average, or Adam `v`.
+    conn_v: HashMap<(u16, u16), f64>,
+    /// Second-moment accumulator per word key.
+    word_v: HashMap<u32, f64>,
+    /// Adam first moment `m` per connection key (unused by other optimizers).
+    conn_m: HashMap<(u16, u16), f64>,
+    /// Adam first moment `m` per word key.
+    word_m: HashMap<u32, f64>,
+    /// Global Adam timestep, incremented once per parameter-update step and
+    /// monotonically increasing across all batches and epochs.
+    t: u64,
+}
+
+impl OptimizerState {
+    /// Create empty state for `optimizer`.
+    pub fn new(optimizer: Optimizer) -> Self {
+        Self {
+            optimizer,
+            conn_v: HashMap::new(),
+            word_v: HashMap::new(),
+            conn_m: HashMap::new(),
+            word_m: HashMap::new(),
+            t: 0,
+        }
+    }
+
+    /// The optimizer this state drives.
+    pub fn optimizer(&self) -> Optimizer {
+        self.optimizer
+    }
+
+    /// Current global Adam timestep (`0` for non-Adam optimizers).
+    pub fn timestep(&self) -> u64 {
+        self.t
+    }
+
+    /// Effective step for the connection parameter `(right_id, left_id)`.
+    ///
+    /// Returns the f64 amount to **subtract** from the cost (same sign
+    /// convention as [`apply_conn_gradient_update`]).  Mutates the per-parameter
+    /// adaptive state in place.
+    pub fn conn_step(
+        &mut self,
+        key: (u16, u16),
+        grad: f64,
+        lr: f64,
+        config: &OptimizerConfig,
+    ) -> f64 {
+        adaptive_step(
+            self.optimizer,
+            &mut self.conn_v,
+            &mut self.conn_m,
+            &mut self.t,
+            key,
+            grad,
+            lr,
+            config,
+        )
+    }
+
+    /// Effective step for the word parameter `word_id`.
+    ///
+    /// Returns the f64 amount to **subtract** from the word-cost delta.
+    pub fn word_step(&mut self, key: u32, grad: f64, lr: f64, config: &OptimizerConfig) -> f64 {
+        adaptive_step(
+            self.optimizer,
+            &mut self.word_v,
+            &mut self.word_m,
+            &mut self.t,
+            key,
+            grad,
+            lr,
+            config,
+        )
+    }
+}
+
+/// Core per-parameter optimizer math shared by connection and word updates.
+///
+/// `v_map` holds the second-moment accumulator (AdaGrad `G`, RMSProp decayed
+/// average, or Adam `v`) and `m_map` the Adam first moment; `t` is the shared
+/// global Adam timestep.  Returns the f64 step to subtract from the parameter.
+#[allow(clippy::too_many_arguments)]
+fn adaptive_step<K>(
+    optimizer: Optimizer,
+    v_map: &mut HashMap<K, f64>,
+    m_map: &mut HashMap<K, f64>,
+    t: &mut u64,
+    key: K,
+    grad: f64,
+    lr: f64,
+    config: &OptimizerConfig,
+) -> f64
+where
+    K: std::hash::Hash + Eq + Copy,
+{
+    match optimizer {
+        // L-BFGS uses its own batch driver, never this per-step path; treat as
+        // plain SGD if ever reached so the match stays total.
+        Optimizer::Sgd | Optimizer::Lbfgs => lr * grad,
+        Optimizer::AdaGrad => {
+            let g = v_map.entry(key).or_insert(0.0);
+            *g += grad * grad;
+            lr * grad / (g.sqrt() + config.epsilon)
+        }
+        Optimizer::RmsProp => {
+            let decay = config.rmsprop_decay;
+            let g = v_map.entry(key).or_insert(0.0);
+            *g = decay * *g + (1.0 - decay) * grad * grad;
+            lr * grad / (g.sqrt() + config.epsilon)
+        }
+        Optimizer::Adam => {
+            *t += 1;
+            let b1 = config.adam_beta1;
+            let b2 = config.adam_beta2;
+            let m_new = {
+                let m = m_map.entry(key).or_insert(0.0);
+                *m = b1 * *m + (1.0 - b1) * grad;
+                *m
+            };
+            let v_new = {
+                let v = v_map.entry(key).or_insert(0.0);
+                *v = b2 * *v + (1.0 - b2) * grad * grad;
+                *v
+            };
+            let t_f = *t as f64;
+            let m_hat = m_new / (1.0 - b1.powf(t_f));
+            let v_hat = v_new / (1.0 - b2.powf(t_f));
+            lr * m_hat / (v_hat.sqrt() + config.epsilon)
+        }
+    }
+}
+
 // ── Training step summary ─────────────────────────────────────────────────────
 
 /// Summary statistics for one CRF training step.
@@ -200,7 +412,30 @@ pub struct TrainStepSummary {
 /// Temperature for Boltzmann weighting, matching the value used in `fb.rs`.
 const TEMPERATURE: f64 = 500.0;
 
-/// Compute the CRF gradient for one sentence.
+/// Compute the CRF gradient for one sentence against the immutable dictionary.
+///
+/// Thin wrapper over `compute_sentence_gradient_with` using `DictCostSource`
+/// — byte-identical to the historical behaviour.  `prob_table` must have been
+/// produced by `ViterbiSolver::forward_backward(lattice)` (i.e. with the same
+/// dictionary costs).
+pub fn compute_sentence_gradient(
+    prob_table: &LatticeProbTable,
+    lattice: &Lattice<'_>,
+    gold: &GoldSegmentation,
+    dict: &Dictionary,
+    gradient: &mut CrfGradient,
+) -> f64 {
+    compute_sentence_gradient_with(
+        prob_table,
+        lattice,
+        gold,
+        dict,
+        &DictCostSource { dict },
+        gradient,
+    )
+}
+
+/// Compute the CRF gradient for one sentence using an explicit [`EdgeCostSource`].
 ///
 /// Given a lattice (all possible segmentations) and a gold segmentation,
 /// computes:
@@ -216,11 +451,12 @@ const TEMPERATURE: f64 = 500.0;
 /// # Returns
 /// The negative log-likelihood of the gold segmentation under the current model.
 #[allow(clippy::too_many_lines)]
-pub fn compute_sentence_gradient(
+pub(crate) fn compute_sentence_gradient_with<S: EdgeCostSource>(
     prob_table: &LatticeProbTable,
     lattice: &Lattice<'_>,
     gold: &GoldSegmentation,
     dict: &Dictionary,
+    costs: &S,
     gradient: &mut CrfGradient,
 ) -> f64 {
     // ── A. Empirical counts from the gold segmentation ────────────────────────
@@ -278,9 +514,10 @@ pub fn compute_sentence_gradient(
         }
     }
 
-    // Expected connection counts via edge marginals computed from the lattice.
+    // Expected connection counts via edge marginals computed from the lattice
+    // under the supplied cost source (the evolving model during iterative training).
     let solver = ViterbiSolver::new(dict);
-    let expected_conn = solver.compute_edge_expected_counts(lattice);
+    let expected_conn = solver.compute_edge_expected_counts_with(lattice, costs);
 
     // ── C. Accumulate gradient = empirical − expected ─────────────────────────
 
@@ -375,22 +612,37 @@ pub fn compute_sentence_gradient(
     nll
 }
 
-/// Accumulate CRF gradients over a mini-batch of sentences.
+/// Accumulate CRF gradients over a mini-batch against the immutable dictionary.
 ///
-/// For each `(lattice, gold)` pair, runs forward-backward to build `prob_table`
-/// and then calls [`compute_sentence_gradient`].  Returns a merged gradient and
-/// the total loss (summed NLL over all sentences in the batch).
+/// Thin wrapper over `accumulate_batch_gradient_with` using `DictCostSource`
+/// — byte-identical to the historical behaviour.
+pub fn accumulate_batch_gradient(
+    batch: &[(&Lattice<'_>, &GoldSegmentation)],
+    dict: &Dictionary,
+    gradient: &mut CrfGradient,
+) -> TrainStepSummary {
+    accumulate_batch_gradient_with(batch, dict, &DictCostSource { dict }, gradient)
+}
+
+/// Accumulate CRF gradients over a mini-batch of sentences using an explicit
+/// [`EdgeCostSource`].
+///
+/// For each `(lattice, gold)` pair, runs forward-backward (under `costs`) to
+/// build `prob_table` and then calls [`compute_sentence_gradient_with`].
+/// Returns a merged gradient and the total loss (summed NLL over all sentences).
 ///
 /// # Arguments
 /// * `batch`    — slice of (lattice, gold) pairs
-/// * `dict`     — the dictionary shared by all lattices
+/// * `dict`     — the dictionary shared by all lattices (lattice structure)
+/// * `costs`    — cost source for connection/word costs (dictionary or evolving model)
 /// * `gradient` — accumulator to which results are added (not cleared first)
 ///
 /// # Returns
 /// A [`TrainStepSummary`] containing the total NLL loss and batch statistics.
-pub fn accumulate_batch_gradient(
+pub(crate) fn accumulate_batch_gradient_with<S: EdgeCostSource>(
     batch: &[(&Lattice<'_>, &GoldSegmentation)],
     dict: &Dictionary,
+    costs: &S,
     gradient: &mut CrfGradient,
 ) -> TrainStepSummary {
     let solver = ViterbiSolver::new(dict);
@@ -398,8 +650,8 @@ pub fn accumulate_batch_gradient(
     let mut total_tokens = 0_usize;
 
     for (lattice, gold) in batch {
-        let prob_table = solver.forward_backward(lattice);
-        let nll = compute_sentence_gradient(&prob_table, lattice, gold, dict, gradient);
+        let prob_table = solver.forward_backward_with(lattice, costs);
+        let nll = compute_sentence_gradient_with(&prob_table, lattice, gold, dict, costs, gradient);
         total_loss += nll;
         total_tokens += gold.morphemes.len();
     }
@@ -455,6 +707,49 @@ pub fn apply_word_gradient_update<S: std::hash::BuildHasher>(
     }
 }
 
+/// Apply a connection-cost update using an adaptive [`OptimizerState`].
+///
+/// Identical to [`apply_conn_gradient_update`] when `config.optimizer` is
+/// [`Optimizer::Sgd`]; otherwise the per-parameter step is adapted via `state`,
+/// whose accumulators persist across calls (and therefore across batches and
+/// epochs).  The update rule remains `cost -= round(step)` with i16 clamping.
+pub fn apply_conn_gradient_update_opt(
+    matrix: &mut [i16],
+    left_size: usize,
+    gradient: &CrfGradient,
+    learning_rate: f64,
+    state: &mut OptimizerState,
+    config: &OptimizerConfig,
+) {
+    for (&(right_id, left_id), &grad) in &gradient.conn_gradients {
+        let idx = right_id as usize + left_size * left_id as usize;
+        if idx < matrix.len() {
+            let step = state.conn_step((right_id, left_id), grad, learning_rate, config);
+            let delta = step.round() as i64;
+            let updated = matrix[idx] as i64 - delta;
+            matrix[idx] = updated.clamp(i16::MIN as i64, i16::MAX as i64) as i16;
+        }
+    }
+}
+
+/// Apply word-cost gradient updates using an adaptive [`OptimizerState`].
+///
+/// Identical to [`apply_word_gradient_update`] when `config.optimizer` is
+/// [`Optimizer::Sgd`]; otherwise the per-parameter step is adapted via `state`.
+/// The update rule remains `delta[word_id] -= step`.
+pub fn apply_word_gradient_update_opt<S: std::hash::BuildHasher>(
+    deltas: &mut HashMap<u32, f64, S>,
+    gradient: &CrfGradient,
+    learning_rate: f64,
+    state: &mut OptimizerState,
+    config: &OptimizerConfig,
+) {
+    for (&word_id, &grad) in &gradient.word_gradients {
+        let step = state.word_step(word_id, grad, learning_rate, config);
+        *deltas.entry(word_id).or_insert(0.0) -= step;
+    }
+}
+
 // ── Edge marginals (package-private helper) ───────────────────────────────────
 //
 // Used internally by compute_sentence_gradient; also exposed so that fb.rs can
@@ -471,12 +766,12 @@ pub fn apply_word_gradient_update<S: std::hash::BuildHasher>(
 ///   p(u→v) = exp(alpha[prev_pos][i] + log_conn(u,v) + (-v.wcost/T) + beta[pos][j] - log_Z)
 ///
 /// We sum these per (u.right_id, v.left_id) to get expected connection counts.
-pub(super) fn edge_expected_counts_from_fb(
+pub(super) fn edge_expected_counts_from_fb<S: EdgeCostSource>(
     lattice: &Lattice<'_>,
     alpha: &[Vec<f64>],
     beta: &[Vec<f64>],
     log_z: f64,
-    dict: &Dictionary,
+    costs: &S,
 ) -> HashMap<(u16, u16), f64> {
     let mut counts: HashMap<(u16, u16), f64> = HashMap::new();
 
@@ -493,7 +788,7 @@ pub(super) fn edge_expected_counts_from_fb(
             if beta_j == f64::NEG_INFINITY {
                 continue;
             }
-            let wcost_contrib = -(node.wcost as f64) / TEMPERATURE;
+            let wcost_contrib = -costs.word_cost(node) / TEMPERATURE;
 
             // Enumerate predecessor positions using the same logic as forward_backward
             let primary_prev_pos = if node.start == 0 {
@@ -502,10 +797,17 @@ pub(super) fn edge_expected_counts_from_fb(
                 node.start + 1
             };
 
-            // Primary predecessor slot
+            // Predecessors of `node` all live in a single bucket
+            // (`primary_prev_pos`) by the lattice invariant — no span scan needed.
             if primary_prev_pos < n {
                 let prev_nodes = lattice.nodes_ending_at(primary_prev_pos);
                 for (i, prev_node) in prev_nodes.iter().enumerate() {
+                    // Same-position arc (EOS only): valid predecessors are
+                    // strictly earlier in the bucket — this also excludes the
+                    // spurious EOS→EOS self-edge.
+                    if primary_prev_pos == pos && i >= j {
+                        break;
+                    }
                     let alpha_i = alpha[primary_prev_pos]
                         .get(i)
                         .copied()
@@ -513,29 +815,7 @@ pub(super) fn edge_expected_counts_from_fb(
                     if alpha_i == f64::NEG_INFINITY {
                         continue;
                     }
-                    let conn = dict.connection_cost(prev_node.right_id, node.left_id) as f64;
-                    let arc_contrib = -conn / TEMPERATURE;
-                    let log_edge_prob = alpha_i + arc_contrib + wcost_contrib + beta_j - log_z;
-                    let edge_prob = log_edge_prob.exp().clamp(0.0, 1.0);
-                    *counts
-                        .entry((prev_node.right_id, node.left_id))
-                        .or_insert(0.0) += edge_prob;
-                }
-            }
-
-            // Span case: earlier positions whose nodes end at node.start
-            let span_limit = primary_prev_pos.min(n);
-            for (check_pos, alpha_check) in alpha.iter().enumerate().take(span_limit).skip(1) {
-                let prev_nodes = lattice.nodes_ending_at(check_pos);
-                for (i, prev_node) in prev_nodes.iter().enumerate() {
-                    if prev_node.end != node.start {
-                        continue;
-                    }
-                    let alpha_i = alpha_check.get(i).copied().unwrap_or(f64::NEG_INFINITY);
-                    if alpha_i == f64::NEG_INFINITY {
-                        continue;
-                    }
-                    let conn = dict.connection_cost(prev_node.right_id, node.left_id) as f64;
+                    let conn = costs.connection_cost(prev_node.right_id, node.left_id);
                     let arc_contrib = -conn / TEMPERATURE;
                     let log_edge_prob = alpha_i + arc_contrib + wcost_contrib + beta_j - log_z;
                     let edge_prob = log_edge_prob.exp().clamp(0.0, 1.0);
@@ -671,5 +951,166 @@ mod tests {
         apply_conn_gradient_update(&mut matrix, 2, &grad, 0.5);
         // delta = round(0.5 * 10) = 5; 100 - 5 = 95
         assert_eq!(matrix[2], 95i16);
+    }
+
+    // ── Optimizer tests ───────────────────────────────────────────────────────
+
+    #[test]
+    fn test_optimizer_default_is_sgd() {
+        assert_eq!(Optimizer::default(), Optimizer::Sgd);
+        let cfg = OptimizerConfig::default();
+        assert_eq!(cfg.optimizer, Optimizer::Sgd);
+        assert!((cfg.epsilon - 1e-8).abs() < 1e-20);
+        assert!((cfg.rmsprop_decay - 0.9).abs() < 1e-12);
+        assert!((cfg.adam_beta1 - 0.9).abs() < 1e-12);
+        assert!((cfg.adam_beta2 - 0.999).abs() < 1e-12);
+    }
+
+    /// SGD via `OptimizerState` must produce exactly `lr * grad` and never
+    /// advance the Adam timestep.
+    #[test]
+    fn test_optimizer_state_sgd_step_identity() {
+        let cfg = OptimizerConfig::default(); // Sgd
+        let mut state = OptimizerState::new(Optimizer::Sgd);
+        let lr = 0.05_f64;
+        let grad = 7.5_f64;
+        let step = state.conn_step((3, 4), grad, lr, &cfg);
+        assert!(
+            (step - lr * grad).abs() < 1e-15,
+            "SGD conn step must equal lr*grad, got {step}"
+        );
+        let wstep = state.word_step(42, grad, lr, &cfg);
+        assert!(
+            (wstep - lr * grad).abs() < 1e-15,
+            "SGD word step must equal lr*grad, got {wstep}"
+        );
+        assert_eq!(
+            state.timestep(),
+            0,
+            "SGD must not advance the Adam timestep"
+        );
+    }
+
+    /// AdaGrad: first step ≈ `lr*grad/(|grad|+ε)`; a second update with the same
+    /// gradient yields a strictly smaller step (per-parameter LR decay).
+    #[test]
+    fn test_optimizer_state_adagrad_per_param_decay() {
+        let cfg = OptimizerConfig {
+            optimizer: Optimizer::AdaGrad,
+            ..OptimizerConfig::default()
+        };
+        let mut state = OptimizerState::new(Optimizer::AdaGrad);
+        let lr = 1.0_f64;
+        let grad = 20.0_f64;
+        let step1 = state.conn_step((0, 0), grad, lr, &cfg);
+        let step2 = state.conn_step((0, 0), grad, lr, &cfg);
+        // G = grad² after the first update → √G = |grad|.
+        let expected1 = lr * grad / (grad.abs() + cfg.epsilon);
+        assert!(
+            (step1 - expected1).abs() < 1e-9,
+            "step1={step1} expected≈{expected1}"
+        );
+        assert!(step1.is_finite() && step2.is_finite());
+        assert!(
+            step2 < step1,
+            "second AdaGrad step must be smaller: step1={step1} step2={step2}"
+        );
+    }
+
+    /// Adam: first step is finite, non-zero, and ≈ `lr` for a unit gradient; the
+    /// global timestep increments once per parameter update, monotonically.
+    #[test]
+    fn test_optimizer_state_adam_first_step_and_timestep() {
+        let cfg = OptimizerConfig {
+            optimizer: Optimizer::Adam,
+            ..OptimizerConfig::default()
+        };
+        let mut state = OptimizerState::new(Optimizer::Adam);
+        let lr = 0.01_f64;
+        let step = state.conn_step((1, 1), 1.0, lr, &cfg);
+        assert!(step.is_finite(), "Adam step must be finite, got {step}");
+        assert!(step.abs() > 0.0, "Adam step must be non-zero");
+        assert!(
+            (step - lr).abs() < 1e-6,
+            "bias-corrected first Adam step ≈ lr for unit grad, got {step}"
+        );
+        assert_eq!(state.timestep(), 1, "timestep must advance to 1");
+        let _ = state.conn_step((2, 2), 1.0, lr, &cfg);
+        assert_eq!(state.timestep(), 2, "timestep must be monotonic");
+        let _ = state.word_step(7, -1.0, lr, &cfg);
+        assert_eq!(
+            state.timestep(),
+            3,
+            "word updates share the global Adam timestep"
+        );
+    }
+
+    /// The SGD optimizer path must be byte-identical to the plain update.
+    #[test]
+    fn test_apply_conn_gradient_update_opt_sgd_matches_plain() {
+        let mut m_plain = vec![0i16, 0, 100, 0];
+        let mut m_opt = m_plain.clone();
+        let mut grad = CrfGradient::new();
+        grad.add_conn(0, 1, 10.0); // idx = 0 + 2*1 = 2
+        apply_conn_gradient_update(&mut m_plain, 2, &grad, 0.5);
+        let cfg = OptimizerConfig::default(); // Sgd
+        let mut state = OptimizerState::new(Optimizer::Sgd);
+        apply_conn_gradient_update_opt(&mut m_opt, 2, &grad, 0.5, &mut state, &cfg);
+        assert_eq!(m_plain, m_opt, "SGD optimizer path must match plain update");
+    }
+
+    /// AdaGrad connection update differs from the SGD result and stays finite —
+    /// the optimizer-path analogue of "the trained matrix differs from SGD".
+    #[test]
+    fn test_apply_conn_gradient_update_opt_adagrad_differs_from_sgd() {
+        let mut m_sgd = vec![0i16; 4];
+        let mut m_ada = vec![0i16; 4];
+        let mut grad = CrfGradient::new();
+        grad.add_conn(0, 0, 20.0); // idx 0
+        let lr = 1.0;
+
+        let sgd_cfg = OptimizerConfig::default();
+        let mut sgd_state = OptimizerState::new(Optimizer::Sgd);
+        apply_conn_gradient_update_opt(&mut m_sgd, 2, &grad, lr, &mut sgd_state, &sgd_cfg);
+
+        let ada_cfg = OptimizerConfig {
+            optimizer: Optimizer::AdaGrad,
+            ..OptimizerConfig::default()
+        };
+        let mut ada_state = OptimizerState::new(Optimizer::AdaGrad);
+        apply_conn_gradient_update_opt(&mut m_ada, 2, &grad, lr, &mut ada_state, &ada_cfg);
+
+        // SGD: 0 - round(1.0*20) = -20. AdaGrad: 0 - round(~1.0) = -1.
+        assert_eq!(m_sgd[0], -20, "SGD subtracts the full gradient");
+        assert_eq!(m_ada[0], -1, "AdaGrad subtracts a normalised unit step");
+        assert_ne!(m_sgd, m_ada, "AdaGrad update must differ from SGD update");
+    }
+
+    /// AdaGrad word updates accumulate across calls (state persists) and the
+    /// second per-parameter step shrinks.
+    #[test]
+    fn test_apply_word_gradient_update_opt_adagrad_accumulates() {
+        let mut deltas: HashMap<u32, f64> = HashMap::new();
+        let mut grad = CrfGradient::new();
+        grad.add_word(5, 4.0);
+        let cfg = OptimizerConfig {
+            optimizer: Optimizer::AdaGrad,
+            ..OptimizerConfig::default()
+        };
+        let mut state = OptimizerState::new(Optimizer::AdaGrad);
+
+        apply_word_gradient_update_opt(&mut deltas, &grad, 1.0, &mut state, &cfg);
+        let d1 = deltas[&5];
+        apply_word_gradient_update_opt(&mut deltas, &grad, 1.0, &mut state, &cfg);
+        let d2 = deltas[&5];
+
+        let dec1 = -d1; // first decrement magnitude (grad>0 → step>0 → delta down)
+        let dec2 = -(d2 - d1); // second decrement magnitude
+        assert!(d1.is_finite() && d2.is_finite());
+        assert!(dec1 > 0.0 && dec2 > 0.0, "dec1={dec1} dec2={dec2}");
+        assert!(
+            dec2 < dec1,
+            "AdaGrad second word step must shrink: dec1={dec1} dec2={dec2}"
+        );
     }
 }

@@ -12,12 +12,18 @@ use std::path::Path;
 use byteorder::{LittleEndian, WriteBytesExt};
 
 use crate::dict::{ConnectionMatrix, Dictionary};
-use crate::lattice::Lattice;
+use crate::lattice::{Lattice, LatticeNode};
+use crate::viterbi::fb::EdgeCostSource;
 use crate::viterbi::train::{
     CrfGradient, GoldSegmentation, TrainStepSummary, accumulate_batch_gradient,
-    apply_conn_gradient_update, apply_word_gradient_update,
+    accumulate_batch_gradient_with, apply_conn_gradient_update, apply_conn_gradient_update_opt,
+    apply_word_gradient_update, apply_word_gradient_update_opt,
 };
 use crate::{Error, Result};
+
+// Re-export the optimizer types next to [`DictTrainConfig`] for ergonomic access
+// (e.g. `mecrab::viterbi::train_loop::Optimizer`).
+pub use crate::viterbi::train::{Optimizer, OptimizerConfig, OptimizerState};
 
 // ── TrainingMatrix ────────────────────────────────────────────────────────────
 
@@ -80,6 +86,33 @@ impl TrainingMatrix {
     /// Apply a [`CrfGradient`] word-cost update, accumulating into `word_cost_deltas`.
     pub fn apply_word_gradient(&mut self, gradient: &CrfGradient, lr: f64) {
         apply_word_gradient_update(&mut self.word_cost_deltas, gradient, lr);
+    }
+
+    /// Apply a [`CrfGradient`] connection-cost update via an adaptive
+    /// [`OptimizerState`].  For [`Optimizer::Sgd`] this matches
+    /// [`apply_gradient`](Self::apply_gradient) exactly.
+    pub fn apply_gradient_opt(
+        &mut self,
+        gradient: &CrfGradient,
+        lr: f64,
+        state: &mut OptimizerState,
+        config: &OptimizerConfig,
+    ) {
+        apply_conn_gradient_update_opt(&mut self.data, self.lsize, gradient, lr, state, config);
+    }
+
+    /// Apply a [`CrfGradient`] word-cost update via an adaptive
+    /// [`OptimizerState`], accumulating into `word_cost_deltas`.  For
+    /// [`Optimizer::Sgd`] this matches
+    /// [`apply_word_gradient`](Self::apply_word_gradient) exactly.
+    pub fn apply_word_gradient_opt(
+        &mut self,
+        gradient: &CrfGradient,
+        lr: f64,
+        state: &mut OptimizerState,
+        config: &OptimizerConfig,
+    ) {
+        apply_word_gradient_update_opt(&mut self.word_cost_deltas, gradient, lr, state, config);
     }
 
     /// Return word-cost deltas rounded to i16 (word_id → delta_i16).
@@ -174,6 +207,32 @@ pub struct DictTrainConfig {
     ///   `lr - (e / (epochs-1)) * (lr - min_learning_rate)`
     /// giving a linear schedule from `learning_rate` down to `min_learning_rate`.
     pub min_learning_rate: f64,
+    /// Optimizer used for parameter updates. Default: [`Optimizer::Sgd`].
+    pub optimizer: Optimizer,
+    /// Numerical-stability epsilon for adaptive optimizers. Default: `1e-8`.
+    pub epsilon: f64,
+    /// RMSProp squared-gradient decay rate. Default: `0.9`.
+    pub rmsprop_decay: f64,
+    /// Adam first-moment decay (β₁). Default: `0.9`.
+    pub adam_beta1: f64,
+    /// Adam second-moment decay (β₂). Default: `0.999`.
+    pub adam_beta2: f64,
+    /// Recompute the CRF gradient under the current (evolving) model each epoch.
+    ///
+    /// When `false` (default), the gradient is computed once under the initial
+    /// system dictionary every epoch — fixed-direction descent, byte-identical to
+    /// the historical trainer.  When `true`, expected counts are recomputed from
+    /// the in-training [`TrainingMatrix`] (connection costs + word-cost deltas) via
+    /// `accumulate_batch_gradient_with`, making AdaGrad/RMSProp/Adam/SGD true
+    /// *iterative* CRF optimizers (and unblocking second-order methods).
+    pub iterative: bool,
+    /// `L1` (OWL-QN) regularization strength for the [`Optimizer::Lbfgs`] path.
+    /// `0.0` ⇒ plain L-BFGS with `L2` (`l2_strength`) only. Ignored by the
+    /// per-step optimizers.
+    pub l1_strength: f64,
+    /// L-BFGS history size `m` (retained curvature pairs) for the
+    /// [`Optimizer::Lbfgs`] path. Default 8.
+    pub lbfgs_memory: usize,
 }
 
 impl Default for DictTrainConfig {
@@ -185,6 +244,27 @@ impl Default for DictTrainConfig {
             l2_strength: 1e-5,
             verbose: false,
             min_learning_rate: 0.0,
+            optimizer: Optimizer::Sgd,
+            epsilon: 1e-8,
+            rmsprop_decay: 0.9,
+            adam_beta1: 0.9,
+            adam_beta2: 0.999,
+            iterative: false,
+            l1_strength: 0.0,
+            lbfgs_memory: 8,
+        }
+    }
+}
+
+impl DictTrainConfig {
+    /// Bundle the optimizer hyperparameters for [`OptimizerState`] stepping.
+    pub fn optimizer_config(&self) -> OptimizerConfig {
+        OptimizerConfig {
+            optimizer: self.optimizer,
+            epsilon: self.epsilon,
+            rmsprop_decay: self.rmsprop_decay,
+            adam_beta1: self.adam_beta1,
+            adam_beta2: self.adam_beta2,
         }
     }
 }
@@ -249,15 +329,39 @@ pub fn train_dict(
         gold.resolve_ids(dict);
     }
 
+    // L-BFGS / OWL-QN is a batch second-order method with its own driver, not a
+    // per-batch step rule — dispatch before the mini-batch epoch loop.
+    if config.optimizer == Optimizer::Lbfgs {
+        return crate::viterbi::train_lbfgs::train_dict_lbfgs(
+            matrix,
+            &resolved_corpus,
+            dict,
+            config,
+        );
+    }
+
     let mut epoch_stats: Vec<EpochStats> = Vec::with_capacity(config.epochs);
     let mut total_sentences = 0_usize;
     let mut total_tokens = 0_usize;
+
+    // Adaptive-optimizer state persists across ALL epochs and batches so that
+    // AdaGrad accumulation, RMSProp decay, and Adam moments/timestep carry over
+    // the entire run.  For `Optimizer::Sgd` this stays empty and is a no-op.
+    let mut opt_state = OptimizerState::new(config.optimizer);
 
     for epoch in 0..config.epochs {
         // Compute linearly-decayed effective learning rate for this epoch.
         let effective_lr = compute_effective_lr(config, epoch);
 
-        let stats = run_epoch(matrix, &resolved_corpus, dict, config, effective_lr, epoch);
+        let stats = run_epoch(
+            matrix,
+            &resolved_corpus,
+            dict,
+            config,
+            effective_lr,
+            epoch,
+            &mut opt_state,
+        );
         if config.verbose {
             eprintln!(
                 "epoch {}/{}: loss={:.4}  sentences={}  tokens={}  lr={:.6}",
@@ -295,6 +399,44 @@ pub fn compute_effective_lr(config: &DictTrainConfig, epoch: usize) -> f64 {
     }
 }
 
+// ── Evolving-cost source (iterative training) ──────────────────────────────────
+
+/// [`EdgeCostSource`] backed by the *evolving* [`TrainingMatrix`].
+///
+/// Connection costs are read from the in-training matrix; word costs from each
+/// lattice node's baked-in `wcost` plus the accumulated (rounded) word-cost
+/// delta — exactly the model that would be persisted via
+/// [`TrainingMatrix::write_binary`] + [`Dictionary::set_word_cost_overrides`].
+/// Used when [`DictTrainConfig::iterative`] is enabled so the CRF gradient is
+/// recomputed under the current model each epoch (a true iterative fit).
+///
+/// At epoch 0 / a pristine matrix with empty deltas this is **bit-identical** to
+/// `DictCostSource`, because [`TrainingMatrix::from_connection_matrix`] copies the
+/// dictionary matrix verbatim and `wcost + 0 == wcost`.
+struct MatrixCostSource<'m> {
+    matrix: &'m TrainingMatrix,
+}
+
+impl EdgeCostSource for MatrixCostSource<'_> {
+    #[inline]
+    fn connection_cost(&self, right_id: u16, left_id: u16) -> f64 {
+        f64::from(self.matrix.cost(right_id, left_id))
+    }
+
+    #[inline]
+    fn word_cost(&self, node: &LatticeNode<'_>) -> f64 {
+        // Rounded delta keeps this byte-identical to the persisted integer model.
+        let base = f64::from(node.wcost);
+        let delta = self
+            .matrix
+            .word_cost_deltas
+            .get(&node.word_id)
+            .map_or(0.0, |d| d.round());
+        base + delta
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn run_epoch(
     matrix: &mut TrainingMatrix,
     corpus: &[GoldSegmentation],
@@ -302,10 +444,12 @@ fn run_epoch(
     config: &DictTrainConfig,
     effective_lr: f64,
     epoch_idx: usize,
+    opt_state: &mut OptimizerState,
 ) -> EpochStats {
     let mut total_loss = 0.0_f64;
     let mut total_sentences = 0_usize;
     let mut total_tokens = 0_usize;
+    let opt_config = config.optimizer_config();
 
     for batch in corpus.chunks(config.batch_size) {
         // Build lattices; skip sentences that fail to parse
@@ -327,7 +471,16 @@ fn run_epoch(
             lattices.iter().map(|(l, g)| (l, *g)).collect();
 
         let mut gradient = CrfGradient::new();
-        let summary: TrainStepSummary = accumulate_batch_gradient(&refs, dict, &mut gradient);
+        // In iterative mode, recompute expected counts under the *current* matrix
+        // (the evolving model); otherwise use the immutable system dictionary.
+        // The shared `matrix` borrow ends with `costs` (block scope), before the
+        // mutable `apply_gradient_opt` reborrow below.
+        let summary: TrainStepSummary = if config.iterative {
+            let costs = MatrixCostSource { matrix: &*matrix };
+            accumulate_batch_gradient_with(&refs, dict, &costs, &mut gradient)
+        } else {
+            accumulate_batch_gradient(&refs, dict, &mut gradient)
+        };
 
         // Optional L2 regularization: shrink gradient toward zero.
         // Also regularizes accumulated word-cost deltas toward zero.
@@ -335,10 +488,11 @@ fn run_epoch(
             apply_l2(&mut gradient, matrix, config.l2_strength);
         }
 
-        // Apply connection-cost updates
-        matrix.apply_gradient(&gradient, effective_lr);
+        // Apply connection-cost updates via the (persistent) optimizer state.
+        // SGD reproduces the original `cost -= round(lr*grad)` path exactly.
+        matrix.apply_gradient_opt(&gradient, effective_lr, opt_state, &opt_config);
         // Apply word-cost updates (Bug 2 fix: these were previously dropped)
-        matrix.apply_word_gradient(&gradient, effective_lr);
+        matrix.apply_word_gradient_opt(&gradient, effective_lr, opt_state, &opt_config);
 
         total_loss += summary.loss;
         total_sentences += summary.sentence_count;
@@ -526,6 +680,83 @@ mod tests {
         assert_eq!(c.batch_size, 64);
         assert!(!c.verbose);
         assert!((c.min_learning_rate - 0.0).abs() < 1e-9);
+        // Optimizer defaults: plain SGD with the standard adaptive constants.
+        assert_eq!(c.optimizer, Optimizer::Sgd);
+        assert!((c.epsilon - 1e-8).abs() < 1e-20);
+        assert!((c.rmsprop_decay - 0.9).abs() < 1e-12);
+        assert!((c.adam_beta1 - 0.9).abs() < 1e-12);
+        assert!((c.adam_beta2 - 0.999).abs() < 1e-12);
+    }
+
+    /// `optimizer_config()` faithfully bundles the configured hyperparameters.
+    #[test]
+    fn test_optimizer_config_from_dict_train_config() {
+        let c = DictTrainConfig {
+            optimizer: Optimizer::Adam,
+            epsilon: 1e-6,
+            adam_beta1: 0.8,
+            adam_beta2: 0.99,
+            rmsprop_decay: 0.95,
+            ..Default::default()
+        };
+        let oc = c.optimizer_config();
+        assert_eq!(oc.optimizer, Optimizer::Adam);
+        assert!((oc.epsilon - 1e-6).abs() < 1e-20);
+        assert!((oc.adam_beta1 - 0.8).abs() < 1e-12);
+        assert!((oc.adam_beta2 - 0.99).abs() < 1e-12);
+        assert!((oc.rmsprop_decay - 0.95).abs() < 1e-12);
+    }
+
+    /// `TrainingMatrix::apply_gradient_opt` with AdaGrad diverges from the SGD
+    /// path while remaining finite — the unit-level analogue of "the trained
+    /// matrix differs from the SGD run".
+    #[test]
+    fn test_training_matrix_apply_gradient_opt_adagrad_differs() {
+        let mut m_sgd = tiny_matrix(2, 2); // every cell initialised to 10
+        let mut m_ada = tiny_matrix(2, 2);
+        let mut grad = CrfGradient::new();
+        grad.add_conn(0, 1, 20.0); // idx = 0 + 2*1 = 2
+        let lr = 1.0;
+
+        let sgd_cfg = DictTrainConfig::default().optimizer_config(); // Sgd
+        let ada_cfg = DictTrainConfig {
+            optimizer: Optimizer::AdaGrad,
+            ..Default::default()
+        }
+        .optimizer_config();
+
+        let mut sgd_state = OptimizerState::new(Optimizer::Sgd);
+        let mut ada_state = OptimizerState::new(Optimizer::AdaGrad);
+        m_sgd.apply_gradient_opt(&grad, lr, &mut sgd_state, &sgd_cfg);
+        m_ada.apply_gradient_opt(&grad, lr, &mut ada_state, &ada_cfg);
+
+        // SGD: 10 - round(1.0*20) = -10. AdaGrad: 10 - round(~1.0) = 9.
+        assert_eq!(m_sgd.cost(0, 1), -10);
+        assert_eq!(m_ada.cost(0, 1), 9);
+        assert_ne!(
+            m_sgd.cost(0, 1),
+            m_ada.cost(0, 1),
+            "AdaGrad must diverge from SGD"
+        );
+    }
+
+    /// The SGD optimizer method must reproduce the legacy `apply_gradient` path
+    /// byte-for-byte (default-path stability guarantee).
+    #[test]
+    fn test_training_matrix_apply_gradient_opt_sgd_matches_legacy() {
+        let mut m_legacy = tiny_matrix(2, 2);
+        let mut m_opt = tiny_matrix(2, 2);
+        m_legacy.data[2] = 50;
+        m_opt.data[2] = 50;
+        let mut grad = CrfGradient::new();
+        grad.add_conn(0, 1, 5.0);
+
+        m_legacy.apply_gradient(&grad, 1.0);
+        let cfg = DictTrainConfig::default().optimizer_config();
+        let mut state = OptimizerState::new(Optimizer::Sgd);
+        m_opt.apply_gradient_opt(&grad, 1.0, &mut state, &cfg);
+
+        assert_eq!(m_legacy.data, m_opt.data, "SGD opt path must match legacy");
     }
 
     #[test]
@@ -682,6 +913,42 @@ mod tests {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    /// `MatrixCostSource` reads connection costs from the evolving matrix and
+    /// word costs as `node.wcost + round(delta)`; an absent delta leaves `wcost`
+    /// untouched.  With a pristine matrix + empty deltas it therefore equals the
+    /// dictionary costs — the basis of the bit-identical first-step guarantee.
+    #[test]
+    fn test_matrix_cost_source_reads_evolving_costs() {
+        use std::sync::Arc;
+        let mut m = tiny_matrix(2, 2); // every cell = 10
+        m.data[2] = 42; // cost(0, 1) = data[0 + 2*1]
+        m.word_cost_deltas.insert(7, -3.4); // rounds to -3
+
+        let src = MatrixCostSource { matrix: &m };
+        // Costs are exact integers in f64; compare with a tight epsilon.
+        let approx = |got: f64, want: f64| assert!((got - want).abs() < 1e-9, "{got} != {want}");
+        approx(src.connection_cost(0, 1), 42.0); // reads evolving matrix
+        approx(src.connection_cost(0, 0), 10.0);
+        approx(src.connection_cost(9, 9), f64::from(i16::MAX)); // out-of-range → i16::MAX
+
+        let make_node = |word_id: u32, wcost: i16| LatticeNode {
+            surface: "x",
+            start: 0,
+            end: 1,
+            word_id,
+            left_id: 0,
+            right_id: 0,
+            pos_id: 0,
+            wcost,
+            feature: Arc::from(""),
+            is_unknown: false,
+        };
+        // 100 + round(-3.4) = 97
+        approx(src.word_cost(&make_node(7, 100)), 97.0);
+        // no delta recorded for word 999 → unchanged wcost
+        approx(src.word_cost(&make_node(999, 100)), 100.0);
+    }
 
     /// Build a minimal GoldSegmentation from surface strings (no real dict lookup).
     fn make_gold_seg(surfaces: &[&str]) -> GoldSegmentation {

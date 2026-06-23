@@ -125,8 +125,7 @@ impl DebugSession {
 
         // Convert lattice nodes to debug nodes
         let nodes_at: Vec<Vec<DebugNode>> = lattice
-            .nodes_at
-            .iter()
+            .positions()
             .enumerate()
             .map(|(pos, nodes)| {
                 nodes
@@ -171,8 +170,7 @@ impl DebugSession {
 
         // Convert lattice nodes to debug nodes
         let nodes_at: Vec<Vec<DebugNode>> = lattice
-            .nodes_at
-            .iter()
+            .positions()
             .enumerate()
             .map(|(pos, nodes)| {
                 nodes

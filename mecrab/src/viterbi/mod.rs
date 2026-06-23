@@ -16,6 +16,7 @@
 
 pub mod analysis;
 mod fb;
+pub mod lbfgs;
 pub mod nbest;
 /// SIMD-accelerated cost functions.
 ///
@@ -23,6 +24,7 @@ pub mod nbest;
 /// simd128, or a scalar fallback depending on the build target.
 pub mod simd;
 pub mod train;
+pub mod train_lbfgs;
 pub mod train_loop;
 
 use simd::{batch_connection_costs, batch_min_argmin_i64};
@@ -1234,6 +1236,7 @@ mod tests {
     /// We build a table where two different complete paths reach the EOS.
     /// Each path goes through a different intermediate node.
     #[test]
+    #[allow(clippy::too_many_lines)] // explicit lattice-node construction is clearer inline
     fn test_nbest_exact_paths_are_distinct() {
         // Two separate word nodes that each lead to EOS
         let text_len: usize = 3;

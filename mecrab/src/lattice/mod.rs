@@ -192,9 +192,20 @@ impl<'a> LatticeNode<'a> {
 pub struct Lattice<'a> {
     /// Original input text
     pub text: &'a str,
-    /// Nodes at each byte position
-    /// Index 0 contains BOS, last index contains EOS
-    pub nodes_at: Vec<Vec<LatticeNode<'a>>>,
+    /// Flattened CSR storage of all lattice nodes, contiguous in memory.
+    ///
+    /// `flat[offsets[pos]..offsets[pos + 1]]` is the slice of nodes ending at
+    /// byte position `pos`. This replaces the former `Vec<Vec<LatticeNode>>`,
+    /// cutting per-lattice heap allocations from O(text_len) tiny vectors down
+    /// to two contiguous buffers and giving the Viterbi read phase cache-friendly
+    /// sequential access. Access positions via [`nodes_ending_at`](Self::nodes_ending_at)
+    /// or [`positions`](Self::positions).
+    flat: Vec<LatticeNode<'a>>,
+    /// CSR row offsets into `flat`.
+    ///
+    /// Invariant: `offsets.len() == num_positions + 1`, `offsets[0] == 0`,
+    /// `offsets` is monotonically non-decreasing, and `offsets[last] == flat.len()`.
+    offsets: Vec<usize>,
 }
 
 impl<'a> Lattice<'a> {
@@ -209,6 +220,17 @@ impl<'a> Lattice<'a> {
     ///
     /// Returns an error if lattice construction fails.
     pub fn build(text: &'a str, dict: &Dictionary) -> Result<Self> {
+        Ok(Self::from_nodes_at(text, Self::build_nodes_at(text, dict)))
+    }
+
+    /// Build the position-bucketed node lists (pre-freeze intermediate form).
+    ///
+    /// `result[pos]` holds the nodes ending at byte position `pos`; index 0 is
+    /// the BOS slot and index `text_len + 1` is the EOS slot. This is the
+    /// mutable representation used during construction and constraint
+    /// application before being frozen into the CSR layout via
+    /// [`from_nodes_at`](Self::from_nodes_at).
+    fn build_nodes_at(text: &'a str, dict: &Dictionary) -> Vec<Vec<LatticeNode<'a>>> {
         let text_len = text.len();
 
         // Initialize nodes_at with one extra slot for BOS at position 0
@@ -224,15 +246,32 @@ impl<'a> Lattice<'a> {
         #[cfg(not(feature = "parallel"))]
         Self::build_sequential(text, text_len, dict, &mut nodes_at);
 
-        // Handle case where no nodes reach the end
-        // This can happen with unknown characters at the end
-        // (intentional: trailing-char check deferred to caller)
-        let _ = text_len; // suppress potential "unused" in trivial paths
-
-        // Add EOS node at the final position
+        // Add EOS node at the final position. (Trailing unknown characters are
+        // handled inside the builders; reaching the end is the caller's concern.)
         nodes_at[text_len + 1].push(LatticeNode::eos(text_len));
 
-        Ok(Self { text, nodes_at })
+        nodes_at
+    }
+
+    /// Freeze position-bucketed node lists into the contiguous CSR representation.
+    ///
+    /// Preserves node order within every position exactly, so the frozen lattice
+    /// yields byte-identical [`nodes_ending_at`](Self::nodes_ending_at) slices to
+    /// the input buckets — the Viterbi/forward-backward results are unchanged.
+    pub fn from_nodes_at(text: &'a str, nodes_at: Vec<Vec<LatticeNode<'a>>>) -> Self {
+        let total: usize = nodes_at.iter().map(Vec::len).sum();
+        let mut flat = Vec::with_capacity(total);
+        let mut offsets = Vec::with_capacity(nodes_at.len() + 1);
+        offsets.push(0usize);
+        for bucket in nodes_at {
+            flat.extend(bucket);
+            offsets.push(flat.len());
+        }
+        Self {
+            text,
+            flat,
+            offsets,
+        }
     }
 
     /// Sequential lattice builder — always compiled so the parallel test can use it as a
@@ -412,21 +451,30 @@ impl<'a> Lattice<'a> {
 
     /// Get the number of byte positions in the lattice
     pub fn len(&self) -> usize {
-        self.nodes_at.len()
+        self.offsets.len().saturating_sub(1)
     }
 
     /// Check if the lattice is empty
     pub fn is_empty(&self) -> bool {
-        self.nodes_at.is_empty()
+        self.len() == 0
     }
 
     /// Get nodes ending at a specific position
     pub fn nodes_ending_at(&self, pos: usize) -> &[LatticeNode<'a>] {
-        if pos < self.nodes_at.len() {
-            &self.nodes_at[pos]
+        if pos + 1 < self.offsets.len() {
+            &self.flat[self.offsets[pos]..self.offsets[pos + 1]]
         } else {
             &[]
         }
+    }
+
+    /// Iterate over every byte position's node slice in order (CSR rows).
+    ///
+    /// Yields the same slices as calling [`nodes_ending_at`](Self::nodes_ending_at)
+    /// for `pos` in `0..len()`, in order. Replaces the former
+    /// `lattice.nodes_at.iter()` over the bucketed representation.
+    pub fn positions(&self) -> impl Iterator<Item = &[LatticeNode<'a>]> {
+        self.offsets.windows(2).map(|w| &self.flat[w[0]..w[1]])
     }
 
     /// Build a constrained lattice: `text[span.start..span.end]` becomes exactly one token
@@ -442,17 +490,19 @@ impl<'a> Lattice<'a> {
         dict: &Dictionary,
         constraints: &ParseConstraints,
     ) -> Result<Self> {
-        let mut lattice = Self::build(text, dict)?;
+        let mut nodes_at = Self::build_nodes_at(text, dict);
 
         if constraints.is_empty() {
-            return Ok(lattice);
+            return Ok(Self::from_nodes_at(text, nodes_at));
         }
 
         let text_len = text.len();
 
         // Step 1: remove nodes that partially overlap any forced span.
-        for pos in 1..=text_len {
-            lattice.nodes_at[pos].retain(|node| {
+        // Indices `1..=text_len` cover every real position (skip the BOS slot 0
+        // and the EOS slot `text_len + 1`).
+        for nodes in &mut nodes_at[1..=text_len] {
+            nodes.retain(|node| {
                 // Keep BOS/EOS sentinels (they have equal start and end).
                 if node.start == node.end {
                     return true;
@@ -477,14 +527,12 @@ impl<'a> Lattice<'a> {
             }
 
             let slot = e + 1; // nodes_at index for nodes ending at byte `e`
-            if slot >= lattice.nodes_at.len() {
+            if slot >= nodes_at.len() {
                 continue;
             }
 
             // Check if an exact node already exists.
-            let already_present = lattice.nodes_at[slot]
-                .iter()
-                .any(|n| n.start == s && n.end == e);
+            let already_present = nodes_at[slot].iter().any(|n| n.start == s && n.end == e);
 
             if already_present {
                 // Nothing to inject; constraint is already satisfied.
@@ -533,10 +581,10 @@ impl<'a> Lattice<'a> {
                 }
             };
 
-            lattice.nodes_at[slot].push(node);
+            nodes_at[slot].push(node);
         }
 
-        Ok(lattice)
+        Ok(Self::from_nodes_at(text, nodes_at))
     }
 }
 
