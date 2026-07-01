@@ -219,8 +219,7 @@ impl OverlayDictionary {
         // modes fall back to the HashMap scan path (see `lookup` above), so we
         // collapse them to `Option` via `.ok()` without any unwrap.
         if let Ok(da_bytes) = DoubleArrayBuilder::build(&keyset) {
-            *self.trie.write().unwrap_or_else(|e| e.into_inner()) =
-                DoubleArray::new(da_bytes).ok();
+            *self.trie.write().unwrap_or_else(|e| e.into_inner()) = DoubleArray::new(da_bytes).ok();
             *self
                 .surface_index
                 .write()
