@@ -364,7 +364,7 @@ mod tests {
         blob[0..4].copy_from_slice(&0xDEAD_C0DEu32.to_le_bytes());
         let result = MeCrabWasm::parse_blob(&blob);
         assert!(result.is_err(), "Expected Err for wrong magic, got Ok");
-        let msg = result.err().expect("already asserted Err");
+        let msg = result.expect_err("already asserted Err");
         assert!(
             msg.to_lowercase().contains("magic"),
             "Error must mention 'magic', got: {}",
@@ -378,7 +378,7 @@ mod tests {
         let blob = vec![0u8; 10];
         let result = MeCrabWasm::parse_blob(&blob);
         assert!(result.is_err(), "Expected Err for 10-byte blob");
-        let msg = result.err().expect("already asserted Err");
+        let msg = result.expect_err("already asserted Err");
         // The error must mention the size constraint somehow
         let lower = msg.to_lowercase();
         assert!(
@@ -520,7 +520,7 @@ mod tests {
     #[test]
     fn test_parse_very_long_text() {
         let mecrab = MeCrabWasm::new();
-        let long_text: String = std::iter::repeat('あ').take(1000).collect();
+        let long_text: String = "あ".repeat(1000);
         let result = mecrab.parse(&long_text);
         assert!(
             !result.is_empty(),

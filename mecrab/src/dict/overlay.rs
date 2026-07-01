@@ -214,9 +214,13 @@ impl OverlayDictionary {
             .collect();
 
         // Build the trie
-        if let Some(da_bytes) = DoubleArrayBuilder::build(&keyset) {
+        // yada 0.7 changed both `DoubleArrayBuilder::build` and `DoubleArray::new`
+        // from infallible/Option-returning to `Result`-returning. Both failure
+        // modes fall back to the HashMap scan path (see `lookup` above), so we
+        // collapse them to `Option` via `.ok()` without any unwrap.
+        if let Ok(da_bytes) = DoubleArrayBuilder::build(&keyset) {
             *self.trie.write().unwrap_or_else(|e| e.into_inner()) =
-                Some(DoubleArray::new(da_bytes));
+                DoubleArray::new(da_bytes).ok();
             *self
                 .surface_index
                 .write()
