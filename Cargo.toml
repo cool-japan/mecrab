@@ -36,7 +36,7 @@ arc-swap = "1.9"
 
 # Data pipeline dependencies (mecrab-builder)
 # Pure Rust gzip streaming via OxiARC (COOLJAPAN policy: no flate2)
-oxiarc-deflate = "0.3.4"
+oxiarc-deflate = "0.3.5"
 indicatif = "0.18"
 # Note: the "gzip" feature is intentionally omitted — it pulls flate2
 # transitively (tower-http/async-compression), which violates the COOLJAPAN
