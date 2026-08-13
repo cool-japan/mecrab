@@ -52,7 +52,12 @@ default = ["serde", "serde_json"]
 json = ["serde", "serde_json"]
 parallel = ["rayon"]
 simd = []  # Enable SIMD optimizations (nightly)
-wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook", "serde_json"]
+# `serde` joins `serde_json` here (which depends on it anyway) so the wasm
+# feature set matches `json` / `python`. Enabling `serde_json` without `serde`
+# used to leave `Error: From<serde_json::Error>` out of the build — the
+# `serde`-gated impl in error.rs — and `--no-default-features --features wasm`
+# failed with E0277 on `dict::Dictionary::load_with_semantics`.
+wasm = ["wasm-bindgen", "js-sys", "web-sys", "console_error_panic_hook", "serde", "serde_json"]
 python = ["pyo3/extension-module", "serde", "serde_json"]
 # Neural reranking — real BERT perplexity scoring via candle-core.
 neural = [

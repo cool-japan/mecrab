@@ -87,7 +87,12 @@ impl From<std::fmt::Error> for Error {
     }
 }
 
-#[cfg(feature = "serde")]
+// Gated on `serde_json`, not `serde`: this impl needs the JSON error type and
+// nothing from `serde` itself. Gating it on `serde` broke every feature set that
+// enables `serde_json` alone — `--no-default-features --features wasm` among
+// them, where `dict::Dictionary::load_with_semantics` needs the conversion for
+// its `serde_json::from_str(…)?` and the build failed with E0277.
+#[cfg(feature = "serde_json")]
 impl From<serde_json::Error> for Error {
     fn from(e: serde_json::Error) -> Self {
         Error::FormatError(e.to_string())

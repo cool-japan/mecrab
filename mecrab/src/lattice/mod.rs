@@ -14,6 +14,21 @@ use crate::Result;
 use crate::dict::{CharCategory, Dictionary, DictionaryEntry};
 use std::sync::Arc;
 
+/// MeCab's `max-grouping-size` default — the longest same-category run that is
+/// still collapsed into a single unknown-word node.
+///
+/// Mirrors `DEFAULT_MAX_GROUPING_SIZE` in mecab-0.996 `src/tokenizer.cpp`.
+/// MeCab measures the run from the *second* character (its `seekToOtherType`
+/// call starts one character in), so the longest run that still yields one
+/// grouped node is `MAX_GROUPING_SIZE + 1` = 25 characters. Verified against
+/// mecab 0.996 + IPADIC: a run of 25 `a` characters is one token, 26 is two
+/// (`a` + 25 `a`s), 27 is three; 26 katakana characters come out as a 2
+/// character prefix node plus a 24 character group.
+///
+/// IPADIC's `dicrc` does not override `max-grouping-size`, so this default is
+/// what the shipped dictionaries actually use.
+const MAX_GROUPING_SIZE: usize = 24;
+
 // ── Constraint types ─────────────────────────────────────────────────────────
 
 /// Describes a byte span `[start, end)` that must form exactly one token.
@@ -402,50 +417,120 @@ impl<'a> Lattice<'a> {
             }
         }
 
-        // Handle grouping for consecutive characters of the same category
-        if dict.char_def.should_group(category) {
-            Self::add_grouped_unknown(text, pos, category, dict, nodes_at);
-        }
+        // Multi-character unknown nodes for the same-category run starting here.
+        Self::add_unknown_run_nodes(text, pos, c, category, dict, nodes_at);
     }
 
-    /// Add grouped unknown word nodes (consecutive characters of same category)
-    fn add_grouped_unknown(
+    /// Add the multi-character unknown-word nodes for the same-category run that
+    /// starts at `start`.
+    ///
+    /// This implements MeCab's `char.def` semantics (mecab-0.996
+    /// `src/tokenizer.cpp::Tokenizer::lookup`), driven by the two per-character
+    /// flags that the packed `char.bin` carries:
+    ///
+    /// * `GROUP = 1` → **one** node spanning the whole maximal same-category
+    ///   run, emitted only while that run is short enough to group
+    ///   ([`MAX_GROUPING_SIZE`] + 1 characters).
+    /// * `LENGTH = n` → prefix nodes of 1..=n characters and nothing longer.
+    ///   The single-character node is always emitted by
+    ///   [`add_unknown_nodes`](Self::add_unknown_nodes), so this function emits
+    ///   2..=n.
+    ///
+    /// Both bounds are small constants, so a run of `n` characters contributes
+    /// O(1) nodes per position — O(n) for the run — and the scan never walks
+    /// further than the semantics can use. The previous implementation emitted a
+    /// node for *every* prefix of length ≥ 2 at *every* position (Θ(n²) nodes),
+    /// found through a linear duplicate scan of the destination bucket (Θ(n³)
+    /// work), and never consulted `LENGTH` at all: a 3,200 character ASCII run
+    /// took 38.4 s and a 60,000 character one could not finish.
+    ///
+    /// The `GROUP` decision is taken per category via
+    /// [`CharDef::should_group`](crate::dict::CharDef::should_group) rather than
+    /// from the first character's own `CharInfo`. MeCab's `char.def` assigns the
+    /// flags per category, so the two agree for every category a dictionary
+    /// defines — but a packed `char.bin` that leaves unassigned code points
+    /// zeroed (rather than filling them with the mandatory `DEFAULT` category,
+    /// which IPADIC declares as `GROUP = 1`) would otherwise stop grouping
+    /// DEFAULT runs such as astral-plane emoji.
+    fn add_unknown_run_nodes(
         text: &'a str,
         start: usize,
+        first: char,
         category: CharCategory,
         dict: &Dictionary,
         nodes_at: &mut [Vec<LatticeNode<'a>>],
     ) {
-        let remaining = &text[start..];
-        let mut length = 0;
-        let mut char_count = 0;
+        // `LENGTH` from char.def — a 4 bit field, so at most 15.
+        let max_prefix_chars = dict.char_info(first).length() as usize;
+        let group = dict.char_def.should_group(category);
 
-        for c in remaining.chars() {
+        if !group && max_prefix_chars < 2 {
+            // Nothing beyond the single-character node the caller already added.
+            return;
+        }
+
+        // Walk the run, but never further than the semantics can use: `LENGTH`
+        // characters for the prefix nodes, and one character past the longest
+        // groupable run to establish that a run is too long to group.
+        let scan_limit = max_prefix_chars.max(if group { MAX_GROUPING_SIZE + 2 } else { 0 });
+
+        let mut run_bytes = 0usize;
+        let mut run_chars = 0usize;
+        // Cleared when the scan stops early — i.e. the run is longer than
+        // anything that could still be grouped.
+        let mut run_complete = true;
+
+        for c in text[start..].chars() {
             if dict.char_category(c) != category {
                 break;
             }
-            length += c.len_utf8();
-            char_count += 1;
-
-            // Limit group length
-            if char_count > 1 {
-                let entries = dict.unknown.generate_entries(category, length);
-
-                for entry in &entries {
-                    let feature = entry.feature.clone();
-
-                    let node = LatticeNode::unknown(text, start, length, entry, feature);
-                    let end_pos = start + length;
-
-                    if end_pos <= text.len()
-                        && !nodes_at[end_pos + 1]
-                            .iter()
-                            .any(|n| n.start == start && n.end == end_pos)
-                    {
-                        nodes_at[end_pos + 1].push(node);
-                    }
-                }
+            if run_chars == scan_limit {
+                run_complete = false;
+                break;
             }
+            run_bytes += c.len_utf8();
+            run_chars += 1;
+
+            if run_chars >= 2 && run_chars <= max_prefix_chars {
+                Self::push_unknown_nodes(text, start, run_bytes, category, dict, nodes_at);
+            }
+        }
+
+        // The grouped node. Runs of at most `max_prefix_chars` characters were
+        // already emitted by the prefix loop above; MeCab skips that duplicate
+        // the same way (`begin3 == group_begin3` → `continue`).
+        if group
+            && run_complete
+            && run_chars >= 2
+            && run_chars > max_prefix_chars
+            && run_chars <= MAX_GROUPING_SIZE + 1
+        {
+            Self::push_unknown_nodes(text, start, run_bytes, category, dict, nodes_at);
+        }
+    }
+
+    /// Push one unknown-word node per `unk.dic` template for the span
+    /// `text[start..start + length]`.
+    ///
+    /// Every template of the category is emitted, as MeCab's `ADDUNKNWON` macro
+    /// does: the templates differ in context id and cost (IPADIC gives KATAKANA
+    /// six, from 名詞,一般 to 感動詞), and Viterbi picks between them.
+    fn push_unknown_nodes(
+        text: &'a str,
+        start: usize,
+        length: usize,
+        category: CharCategory,
+        dict: &Dictionary,
+        nodes_at: &mut [Vec<LatticeNode<'a>>],
+    ) {
+        let end_pos = start + length;
+        if end_pos > text.len() {
+            return;
+        }
+
+        for entry in &dict.unknown.generate_entries(category, length) {
+            let feature = entry.feature.clone();
+            nodes_at[end_pos + 1].push(LatticeNode::unknown(text, start, length, entry, feature));
         }
     }
 

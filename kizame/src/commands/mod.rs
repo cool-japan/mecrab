@@ -3,6 +3,8 @@
 //! Copyright 2026 COOLJAPAN OU (Team KitaSan)
 
 pub mod dict;
+#[cfg(feature = "full")]
+pub mod dict_compile;
 pub mod explore;
 #[cfg(feature = "lsp")]
 pub mod lsp;
