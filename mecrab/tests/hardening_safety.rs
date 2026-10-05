@@ -196,10 +196,14 @@ fn a_misaligned_double_array_is_rejected() {
     let bytes = [0u8; 32];
     let aligned = bytes.as_ptr().align_offset(4);
     assert!(aligned + 1 + 8 <= bytes.len());
-    assert!(DoubleArrayTrie::from_bytes(&bytes[aligned..], 8).is_ok());
-    assert!(DoubleArrayTrie::from_bytes(&bytes[aligned + 1..], 8).is_err());
-    // An empty array is never read, so its start is not checked.
-    assert!(DoubleArrayTrie::from_bytes(&bytes[aligned + 1..], 0).is_ok());
+    // SAFETY: `bytes` is a local array that outlives every trie made here
+    // (each is dropped at the end of its statement) and is never mutated.
+    unsafe {
+        assert!(DoubleArrayTrie::from_bytes(&bytes[aligned..], 8).is_ok());
+        assert!(DoubleArrayTrie::from_bytes(&bytes[aligned + 1..], 8).is_err());
+        // An empty array is never read, so its start is not checked.
+        assert!(DoubleArrayTrie::from_bytes(&bytes[aligned + 1..], 0).is_ok());
+    }
 }
 
 /// A 32-byte MCV1 header declaring `vocab_size = dim = 2^31` (f32) would make

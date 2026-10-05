@@ -141,8 +141,15 @@ impl SysDic {
     /// Parse from a byte slice, returning a fully-initialized `SysDic`.
     ///
     /// Internal helper used by both `from_mmap` and `from_bytes_owned`.
+    ///
+    /// # Safety
+    ///
+    /// The returned trie and pointers point into `data`, which must stay
+    /// alive, at the same address, and unmodified for as long as they are
+    /// used; both callers move the buffer `data` borrows from into the
+    /// `SysDic`'s `_backing`.
     #[allow(clippy::type_complexity)]
-    fn parse_bytes(
+    unsafe fn parse_bytes(
         data: &[u8],
     ) -> Result<(
         DoubleArrayTrie,
@@ -223,7 +230,9 @@ impl SysDic {
 
         // Create Double-Array Trie
         let da_offset = HEADER_SIZE;
-        let trie = DoubleArrayTrie::from_bytes(&data[da_offset..], da_size)?;
+        // SAFETY: this function's own contract: `data` (and so the trie's
+        // slice of it) stays alive and unmodified while the result is used.
+        let trie = unsafe { DoubleArrayTrie::from_bytes(&data[da_offset..], da_size) }?;
 
         // Get token array pointer
         let token_offset = da_offset + da_size;
@@ -289,7 +298,16 @@ impl SysDic {
             left_size,
             right_size,
             charset,
-        ) = Self::parse_bytes(mmap.as_ref())?;
+        ) = {
+            // SAFETY: `mmap` moves into `_backing` below, in the same `SysDic`
+            // as the trie and pointers; moving the `Arc` does not move the
+            // mapping, which this type never writes and keeps until it is
+            // dropped (that no other process writes the file is the
+            // precondition of the `Mmap::map` that created it). Nothing reads
+            // through the trie after that: dropping a `DoubleArrayTrie` reads
+            // no unit.
+            unsafe { Self::parse_bytes(mmap.as_ref()) }?
+        };
         // Build the two-byte prefix cache once here so every subsequent
         // `common_prefix_search` call benefits from the acceleration.
         trie.build_prefix_cache();
@@ -331,7 +349,13 @@ impl SysDic {
             left_size,
             right_size,
             charset,
-        ) = Self::parse_bytes(data.as_ref())?;
+        ) = {
+            // SAFETY: `data` moves into `_backing` below, in the same `SysDic`
+            // as the trie and pointers; moving the `Arc` does not move the
+            // vector's heap bytes, which nothing mutates through the shared
+            // `Arc`. Dropping a `DoubleArrayTrie` reads no unit.
+            unsafe { Self::parse_bytes(data.as_ref()) }?
+        };
         // Build the two-byte prefix cache once here so every subsequent
         // `common_prefix_search` call benefits from the acceleration.
         trie.build_prefix_cache();

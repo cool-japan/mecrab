@@ -153,16 +153,16 @@ pub struct DoubleArrayTrie {
     prefix_cache: Option<TriePrefixCache>,
 }
 
-// SAFETY: `DoubleArrayTrie` only ever reads through `units_ptr`, never writes,
-// so moving it or sharing `&DoubleArrayTrie` across threads introduces no data
-// race by itself — `Send`/`Sync` concern thread transfer, not the pointer's
-// own validity. That validity (that `units_ptr` still points at live, unchanged
-// backing memory) is the precondition `from_bytes` documents under `# Safety`
-// and does not enforce; nothing here relies on it.
+// SAFETY: the only state behind `units_ptr` is the unit array, which the
+// caller of `from_bytes` (an `unsafe fn`) promised stays alive, at the same
+// address and unmodified for as long as the trie is used, on whichever thread
+// uses it. The trie only ever reads through `units_ptr`, so moving it to
+// another thread hands that thread read access to immutable memory, which is
+// sound; `prefix_cache` is an owned `Box`, `Send` on its own.
 unsafe impl Send for DoubleArrayTrie {}
-// SAFETY: as the `Send` impl above — access through `units_ptr` is read-only, so
-// sharing `&DoubleArrayTrie` adds no data race; whether the pointer is still
-// valid is `from_bytes`' documented precondition, not this impl's concern.
+// SAFETY: every `&self` method only reads the unit array through `units_ptr`
+// (immutable for the trie's whole use, by `from_bytes`' contract) or the owned
+// `prefix_cache`; concurrent reads of immutable memory are not a data race.
 unsafe impl Sync for DoubleArrayTrie {}
 
 impl DoubleArrayTrie {
@@ -171,16 +171,33 @@ impl DoubleArrayTrie {
 
     /// Create a new Double-Array Trie from raw bytes (memory-mapped dictionary)
     ///
+    /// The trie keeps a raw pointer to `data` and does not borrow it, so the
+    /// borrow checker cannot tie the trie to the buffer; this function is
+    /// `unsafe` so that the caller states that it keeps the buffer alive.
+    ///
     /// # Safety
     ///
-    /// The data must remain valid for the lifetime of this struct.
-    /// This is typically ensured by keeping the Mmap alive.
+    /// The first `size_in_bytes` bytes of `data` must stay alive, at the same
+    /// address, and unmodified for as long as the returned trie is used. This
+    /// is typically ensured by keeping the `Mmap` or buffer the slice borrows
+    /// from alive beside the trie, as `SysDic` does.
+    ///
+    /// Without the `unsafe` block, dropping the buffer and then searching the
+    /// trie does not compile:
+    ///
+    /// ```compile_fail,E0133
+    /// let bytes = vec![0u8; 16];
+    /// if let Ok(trie) = mecrab::dict::DoubleArrayTrie::from_bytes(&bytes, 8) {
+    ///     drop(bytes);
+    ///     let _ = trie.exact_match_search(b"a");
+    /// }
+    /// ```
     ///
     /// # Errors
     ///
     /// Returns an error if the data is too small, or if it holds at least one
     /// unit and does not start 4-byte aligned.
-    pub fn from_bytes(data: &[u8], size_in_bytes: usize) -> Result<Self> {
+    pub unsafe fn from_bytes(data: &[u8], size_in_bytes: usize) -> Result<Self> {
         if data.len() < size_in_bytes {
             return Err(Error::CorruptedDictionary(format!(
                 "Double-array data too small: expected {} bytes, got {}",
@@ -226,7 +243,12 @@ impl DoubleArrayTrie {
     #[inline]
     fn get(&self, index: usize) -> Option<Unit> {
         if index < self.size {
-            // Safety: We verified the index is in bounds
+            // SAFETY: `index < self.size` was just checked, and `from_bytes`
+            // checked `data.len() >= size * UNIT_SIZE` and, since `size > 0`,
+            // that `units_ptr` is 4-byte aligned, so the 8-byte `Unit` read is
+            // in bounds and aligned (`Unit` is two integers, valid for any
+            // bytes); the caller of `from_bytes` promised the bytes are alive
+            // and unmodified while `self` is used.
             Some(unsafe { *self.units_ptr.add(index) })
         } else {
             None
@@ -611,8 +633,11 @@ mod tests {
         // Header layout: see sys_dic.rs — HEADER_SIZE = 72 bytes.
         const HEADER_SIZE: usize = 72;
         let da_size = u32::from_le_bytes(buf[24..28].try_into().unwrap()) as usize;
-        let mut trie =
-            DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size).expect("trie parse failed");
+        // SAFETY: `buf` is returned together with the trie, and every caller
+        // keeps the pair; moving a `Vec` does not move its heap bytes, and
+        // nothing mutates them.
+        let mut trie = unsafe { DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size) }
+            .expect("trie parse failed");
         trie.build_prefix_cache();
         (buf, trie)
     }
@@ -701,12 +726,15 @@ mod tests {
         let da_size = u32::from_le_bytes(buf[24..28].try_into().unwrap()) as usize;
 
         // Trie without cache (reference baseline)
-        let trie_no_cache =
-            DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size).expect("trie parse failed");
+        // SAFETY: `buf` is a local of this test that outlives both tries and
+        // is never mutated.
+        let trie_no_cache = unsafe { DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size) }
+            .expect("trie parse failed");
 
         // Trie with cache enabled
-        let mut trie_cached =
-            DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size).expect("trie parse failed");
+        // SAFETY: as above, `buf` outlives `trie_cached` and is not mutated.
+        let mut trie_cached = unsafe { DoubleArrayTrie::from_bytes(&buf[HEADER_SIZE..], da_size) }
+            .expect("trie parse failed");
         trie_cached.build_prefix_cache();
 
         // Test strings: known words, prefixes, no-match strings
