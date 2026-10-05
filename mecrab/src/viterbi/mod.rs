@@ -813,8 +813,13 @@ impl<'a> ViterbiSolver<'a> {
                 continue;
             }
 
-            // Expand to predecessor (single stored back-pointer)
-            let prev_idx = cold.prev.expect("checked above") as usize;
+            // Expand to predecessor (single stored back-pointer). The
+            // `cold.prev.is_none()` case returned above, so `Some` holds here;
+            // `let ... else` keeps to the crate's no-`unwrap`/`expect` policy.
+            let Some(prev) = cold.prev else {
+                continue;
+            };
+            let prev_idx = prev as usize;
             let prev_pos = cold.pos as usize;
 
             if prev_pos < table.positions() && prev_idx < table.len_at(prev_pos) {

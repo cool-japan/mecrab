@@ -171,6 +171,10 @@ impl Dictionary {
         // Load semantic pool
         if semantic_path.exists() {
             let pool_file = File::open(semantic_path)?;
+            // SAFETY: `Mmap::map` is unsafe because another process mutating or
+            // truncating the mapped file is undefined behaviour; this maps a
+            // dictionary file the caller supplied and is expected not to modify
+            // while it is loaded, which is the documented usage of this API.
             let pool_data = unsafe { Mmap::map(&pool_file)? };
             let pool = crate::semantic::pool::SemanticPool::from_bytes(&pool_data)?;
             dict.semantic_pool = Some(Arc::new(pool));
@@ -195,6 +199,10 @@ impl Dictionary {
         }
 
         let file = File::open(path)?;
+        // SAFETY: `Mmap::map` is unsafe because another process mutating or
+        // truncating the mapped file while it is mapped is undefined behaviour;
+        // this maps a dictionary file the caller supplied and is expected not
+        // to modify for the lifetime of the dictionary, the documented usage.
         let mmap = unsafe { Mmap::map(&file)? };
 
         Ok(mmap)
@@ -457,10 +465,17 @@ impl Dictionary {
     ///
     /// # Safety
     ///
-    /// Context IDs must be from valid dictionary entries.
+    /// The caller must ensure that `right_id < self.matrix.left_size()` and
+    /// `left_id < self.matrix.right_size()` — the contract of
+    /// [`ConnectionMatrix::cost_unchecked`]. Context IDs from dictionary
+    /// entries meet it only when the dictionary was built for this matrix:
+    /// loading does not check a token's IDs against the matrix dimensions, so
+    /// use [`Self::connection_cost`] for IDs that have not been checked.
     #[inline]
     pub unsafe fn connection_cost_unchecked(&self, right_id: u16, left_id: u16) -> i16 {
-        // Safety: caller guarantees IDs are valid
+        // SAFETY: the caller guarantees `right_id < matrix.left_size()` and
+        // `left_id < matrix.right_size()` (this `unsafe fn`'s contract), which
+        // is exactly the precondition `ConnectionMatrix::cost_unchecked` states.
         unsafe { self.matrix.cost_unchecked(right_id, left_id) }
     }
 

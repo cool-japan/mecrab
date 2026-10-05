@@ -265,6 +265,10 @@ mod tests {
             let path = std::path::Path::new(p);
             if path.exists() {
                 let file = std::fs::File::open(path).ok()?;
+                // SAFETY: `Mmap::map` is unsafe because another process
+                // mutating or truncating the mapped file is undefined
+                // behaviour; this maps an `unk.dic` the caller supplied and is
+                // expected not to modify while it is loaded.
                 let mmap = Arc::new(unsafe { memmap2::Mmap::map(&file).ok()? });
                 UnknownDictionary::from_mmap(mmap).ok()
             } else {

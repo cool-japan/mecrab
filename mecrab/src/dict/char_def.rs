@@ -137,8 +137,13 @@ pub struct CharDef {
     map_ptr: *const CharInfo,
 }
 
-// Safety: The map_ptr points to immutable memory-mapped data
+// SAFETY: `CharDef` only ever reads through `map_ptr`, never writes, and the
+// memory it points at is the immutable backing store (`_backing`, an
+// `Arc<Mmap>` or `Arc<Vec<u8>>`) that `self` keeps alive, so moving one
+// between threads is sound.
 unsafe impl Send for CharDef {}
+// SAFETY: as the `Send` impl above — the only access through `map_ptr` is an
+// immutable read of shared backing memory, so `&CharDef` is safe to share.
 unsafe impl Sync for CharDef {}
 
 impl std::fmt::Debug for CharDef {
@@ -163,7 +168,14 @@ impl CharDef {
 
         let csize = LittleEndian::read_u32(&data[0..4]) as usize;
 
-        let expected_size = 4 + (csize * 32) + (Self::TABLE_SIZE * CharInfo::SIZE);
+        // Checked: on a 32-bit target (wasm32) `csize * 32` can wrap, which
+        // would let a short file pass the length check below.
+        let expected_size = Self::file_len(csize).ok_or_else(|| {
+            Error::CharDefError(format!(
+                "Character definition category count {} overflows the address space",
+                csize
+            ))
+        })?;
         if data.len() != expected_size {
             return Err(Error::CharDefError(format!(
                 "Character definition file size mismatch: expected {}, got {}",
@@ -186,7 +198,27 @@ impl CharDef {
         }
 
         let map_ptr = data[offset..].as_ptr() as *const CharInfo;
+        // `get_char_info` reads whole `CharInfo`s (a `u32`, align 4) through
+        // this pointer. The table starts at `4 + 32 * csize`, a multiple of 4,
+        // so it is aligned in a memory map or allocator buffer; check it rather
+        // than assume it.
+        if !map_ptr.is_aligned() {
+            return Err(Error::CharDefError(format!(
+                "Character table at offset {} is not {}-byte aligned in memory",
+                offset,
+                std::mem::align_of::<CharInfo>()
+            )));
+        }
         Ok((categories, map_ptr))
+    }
+
+    /// The file length for `csize` categories (`4 + 32 * csize + TABLE_SIZE *
+    /// CharInfo::SIZE`), or `None` when that does not fit in `usize`.
+    fn file_len(csize: usize) -> Option<usize> {
+        csize
+            .checked_mul(32)?
+            .checked_add(4)?
+            .checked_add(Self::TABLE_SIZE * CharInfo::SIZE)
     }
 
     /// Load character definitions from memory-mapped file
@@ -222,7 +254,11 @@ impl CharDef {
     pub fn get_char_info(&self, c: char) -> CharInfo {
         let code = c as u32;
         if code < Self::TABLE_SIZE as u32 {
-            // Safety: We verified the code is in bounds
+            // SAFETY: `code < TABLE_SIZE` was just checked, and `map_ptr`
+            // addresses `TABLE_SIZE` contiguous immutable `CharInfo`s:
+            // `parse_bytes` checked the file length without overflow and
+            // checked `map_ptr` is 4-byte aligned, and `_backing` keeps the
+            // bytes alive for `self`, so the read is inside that allocation.
             unsafe { *self.map_ptr.add(code as usize) }
         } else {
             // For characters outside BMP, return default
@@ -319,6 +355,16 @@ mod tests {
     fn test_charinfo_size() {
         assert_eq!(std::mem::size_of::<CharInfo>(), 4);
         assert_eq!(CharInfo::SIZE, 4);
+    }
+
+    #[test]
+    fn test_file_len_is_checked() {
+        let table = CharDef::TABLE_SIZE * CharInfo::SIZE;
+        assert_eq!(CharDef::file_len(0), Some(4 + table));
+        assert_eq!(CharDef::file_len(3), Some(4 + 96 + table));
+        // `csize * 32` and each addition can overflow on its own.
+        assert_eq!(CharDef::file_len(usize::MAX / 32 + 1), None);
+        assert_eq!(CharDef::file_len(usize::MAX / 32), None);
     }
 
     #[test]

@@ -172,6 +172,10 @@ impl MeCrabBuilder {
             (None, Some(semantic_path)) => {
                 let dict = Dictionary::default_dictionary()?;
                 let pool_file = std::fs::File::open(&semantic_path)?;
+                // SAFETY: `Mmap::map` is unsafe because another process mutating
+                // or truncating the mapped file is undefined behaviour; this
+                // maps a `semantic.bin` the caller supplied and is expected not
+                // to modify while the dictionary is loaded.
                 let pool_data = unsafe { memmap2::Mmap::map(&pool_file)? };
                 let pool = crate::semantic::pool::SemanticPool::from_bytes(&pool_data)?;
                 let mut dict_mut = dict;

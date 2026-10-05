@@ -67,8 +67,12 @@ impl AliasTable {
         }
 
         while !small.is_empty() && !large.is_empty() {
-            let s = small.pop().expect("small non-empty");
-            let l = large.pop().expect("large non-empty");
+            // The loop guard keeps both non-empty, so each `pop` is `Some`;
+            // `let ... else` keeps to the crate's no-`unwrap`/`expect` policy, breaking in
+            // the impossible empty case.
+            let (Some(s), Some(l)) = (small.pop(), large.pop()) else {
+                break;
+            };
 
             prob[s] = scaled[s];
             alias[s] = word_ids[l];

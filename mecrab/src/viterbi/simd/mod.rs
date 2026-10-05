@@ -75,7 +75,7 @@ pub const BATCH_SIZE: usize = 4;
 /// ## Arguments
 ///
 /// - `row_data`: contiguous row slice from `ConnectionMatrix::row_for_left_id`
-///   (length = `rsize`).
+///   (length = `left_size()`, the range of a predecessor's `right_id`).
 /// - `right_ids`: predecessor right_ids to look up (up to 16 elements).
 /// - `out`: output buffer, must be at least `right_ids.len()` elements long.
 ///
@@ -215,7 +215,7 @@ pub fn find_best_predecessor(prev_costs: &[i32], connection_costs: &[i16]) -> Op
 /// ## Platform dispatch
 ///
 /// - **aarch64** (NEON mandatory): 2 × i64 lanes via `int64x2_t`.
-/// - **x86_64**: AVX2 (4 × i64) → SSE4.1 (2 × i64) → scalar, with runtime
+/// - **x86_64**: AVX2 (4 × i64) → SSE4.2 (2 × i64) → scalar, with runtime
 ///   `is_x86_feature_detected!` for baseline builds.
 /// - **wasm32 + simd128**: 2-lane i64x2 SIMD via WebAssembly SIMD128.
 /// - **other**: scalar reference implementation.

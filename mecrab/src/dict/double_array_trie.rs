@@ -153,8 +153,16 @@ pub struct DoubleArrayTrie {
     prefix_cache: Option<TriePrefixCache>,
 }
 
-// Safety: The units_ptr points to immutable memory-mapped data
+// SAFETY: `DoubleArrayTrie` only ever reads through `units_ptr`, never writes,
+// so moving it or sharing `&DoubleArrayTrie` across threads introduces no data
+// race by itself — `Send`/`Sync` concern thread transfer, not the pointer's
+// own validity. That validity (that `units_ptr` still points at live, unchanged
+// backing memory) is the precondition `from_bytes` documents under `# Safety`
+// and does not enforce; nothing here relies on it.
 unsafe impl Send for DoubleArrayTrie {}
+// SAFETY: as the `Send` impl above — access through `units_ptr` is read-only, so
+// sharing `&DoubleArrayTrie` adds no data race; whether the pointer is still
+// valid is `from_bytes`' documented precondition, not this impl's concern.
 unsafe impl Sync for DoubleArrayTrie {}
 
 impl DoubleArrayTrie {
@@ -170,7 +178,8 @@ impl DoubleArrayTrie {
     ///
     /// # Errors
     ///
-    /// Returns an error if the data is too small.
+    /// Returns an error if the data is too small, or if it holds at least one
+    /// unit and does not start 4-byte aligned.
     pub fn from_bytes(data: &[u8], size_in_bytes: usize) -> Result<Self> {
         if data.len() < size_in_bytes {
             return Err(Error::CorruptedDictionary(format!(
@@ -182,8 +191,16 @@ impl DoubleArrayTrie {
 
         let size = size_in_bytes / Self::UNIT_SIZE;
 
-        // Safety: We verify the data is large enough and properly aligned
+        // `get` reads whole `Unit`s (align 4) through this pointer, so a
+        // non-empty array must start 4-byte aligned; check it rather than
+        // assume it. (An empty array is never read.)
         let units_ptr = data.as_ptr() as *const Unit;
+        if size > 0 && !units_ptr.is_aligned() {
+            return Err(Error::CorruptedDictionary(format!(
+                "Double-array data is not {}-byte aligned in memory",
+                std::mem::align_of::<Unit>()
+            )));
+        }
 
         Ok(Self {
             units_ptr,

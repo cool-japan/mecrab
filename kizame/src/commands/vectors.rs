@@ -270,6 +270,10 @@ fn run_vectors_info(vector_pool: &Path) -> Result<(), Box<dyn std::error::Error>
     println!();
 
     let file = File::open(vector_pool)?;
+    // SAFETY: `MmapOptions::map` is unsafe because another process mutating or
+    // truncating the mapped file is undefined behaviour; this maps a vector
+    // pool the user named on the command line and is expected not to modify it
+    // for the brief read below.
     let mmap = unsafe { memmap2::MmapOptions::new().map(&file)? };
     let store = VectorStore::from_mmap(Arc::new(mmap))?;
 

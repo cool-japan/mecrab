@@ -1,7 +1,7 @@
 //! x86_64 AVX2/SSE4.1 SIMD implementations for cost calculations.
 //!
 //! Provides 8-way (AVX2) or 4-way (SSE4.1) i32 parallelism for i32 kernels, and
-//! 4-way (AVX2) or 2-way (SSE4.1) i64 parallelism for the `batch_min_argmin_i64` hot path.
+//! 4-way (AVX2) or 2-way (SSE4.2) i64 parallelism for the `batch_min_argmin_i64` hot path.
 //!
 //! ## Runtime dispatch
 //!
@@ -153,6 +153,10 @@ pub mod x86_impl {
                 let pv = unsafe {
                     _mm256_loadu_si256(ptr_p.add(chunk * 8) as *const core::arch::x86_64::__m256i)
                 };
+                // SAFETY: `chunk < chunks <= len / 8`, so `chunk * 8 + 8 <= len`
+                // and the 8 `i16`s (16 bytes) read from `ptr_c` are in bounds;
+                // avx2/the `_mm_loadu_*` unaligned loads are enabled for this
+                // `#[target_feature]` body, verified by the caller.
                 let cn = unsafe {
                     _mm_loadu_si128(ptr_c.add(chunk * 8) as *const core::arch::x86_64::__m128i)
                 };
@@ -289,6 +293,9 @@ pub mod x86_impl {
                 let pv = unsafe {
                     _mm_loadu_si128(ptr_p.add(chunk * 4) as *const core::arch::x86_64::__m128i)
                 };
+                // SAFETY: `chunk < chunks <= len / 4`, so `chunk * 4 + 4 <= len`
+                // and the 4 `i16`s (8 bytes) read from `ptr_c` are in bounds;
+                // sse4.1 is enabled for this `#[target_feature]` body.
                 let cn = unsafe { _mm_loadu_si64(ptr_c.add(chunk * 4) as *const u8) };
                 let cv = _mm_cvtepi16_epi32(cn);
                 let sv = _mm_add_epi32(pv, cv);
@@ -379,6 +386,9 @@ pub mod x86_impl {
                 let pv = unsafe {
                     _mm256_loadu_si256(ptr_p.add(chunk * 4) as *const core::arch::x86_64::__m256i)
                 };
+                // SAFETY: `chunk < chunks4 <= len / 4`, so `chunk * 4 + 4 <=
+                // len` and the 4 `i32`s (16 bytes) read from `ptr_c` are in
+                // bounds; avx2 is enabled for this `#[target_feature]` body.
                 let cn = unsafe {
                     _mm_loadu_si128(ptr_c.add(chunk * 4) as *const core::arch::x86_64::__m128i)
                 };
@@ -439,14 +449,16 @@ pub mod x86_impl {
         }
     }
 
-    /// Find best predecessor over i64 costs using SSE4.1 (2 x i64 per register).
+    /// Find best predecessor over i64 costs using SSE4.2 (2 x i64 per register).
     ///
     /// `_mm_cmpgt_epi64` + `_mm_blendv_epi8` provide branchless min.
+    /// `_mm_cmpgt_epi64` is an SSE4.2 instruction, so this function requires
+    /// SSE4.2, not only the SSE4.1 its loads use.
     ///
     /// # Safety
     ///
-    /// Caller must ensure `sse4.1` is available. All pointer arithmetic stays within `len`.
-    #[target_feature(enable = "sse4.1")]
+    /// Caller must ensure `sse4.2` is available. All pointer arithmetic stays within `len`.
+    #[target_feature(enable = "sse4.1", enable = "sse4.2")]
     pub(super) unsafe fn find_best_predecessor_i64_sse41(
         prev: &[i64],
         conn: &[i32],
@@ -481,20 +493,24 @@ pub mod x86_impl {
                 let pv = unsafe {
                     _mm_loadu_si128(ptr_p.add(chunk * 2) as *const core::arch::x86_64::__m128i)
                 };
+                // SAFETY: `chunk < chunks2 <= len / 2`, so `chunk * 2 + 2 <=
+                // len` and the 2 `i32`s (8 bytes) read from `ptr_c` are in
+                // bounds; sse4.1 is enabled for this `#[target_feature]` body.
                 let cn = unsafe { _mm_loadu_si64(ptr_c.add(chunk * 2) as *const u8) };
                 let cv = _mm_cvtepi32_epi64(cn);
                 let sv = _mm_add_epi64(pv, cv);
-                // SAFETY: _mm_cmpgt_epi64 is an SSE4.2 intrinsic; this function is
-                // only called from dispatch paths that verify sse4.1, but SSE4.2 is
-                // universally available alongside SSE4.1 on all real CPUs (Nehalem+).
-                let mask = unsafe { _mm_cmpgt_epi64(lane_min, sv) };
+                // `_mm_cmpgt_epi64` needs SSE4.2, now enabled by this fn's
+                // `#[target_feature]`, so it is called bare like the other
+                // intrinsics in this `unsafe fn` body.
+                let mask = _mm_cmpgt_epi64(lane_min, sv);
                 lane_min = _mm_blendv_epi8(lane_min, sv, mask);
             }
 
             // Horizontal reduce 2 x i64 -> 1.
             let shuf = _mm_shuffle_epi32(lane_min, 0b_01_00_11_10);
-            // SAFETY: _mm_cmpgt_epi64 is SSE4.2; see above note.
-            let mask_final = unsafe { _mm_cmpgt_epi64(lane_min, shuf) };
+            // `_mm_cmpgt_epi64` needs SSE4.2, enabled for this body; called
+            // bare like the other intrinsics.
+            let mask_final = _mm_cmpgt_epi64(lane_min, shuf);
             let v1 = _mm_blendv_epi8(lane_min, shuf, mask_final);
             // SAFETY: lane 0 always valid.
             _mm_cvtsi128_si64(v1)
@@ -610,8 +626,8 @@ pub mod x86_impl {
 
     /// Public dispatch for `batch_min_argmin_i64` on x86_64.
     ///
-    /// Priority: compile-time `avx2` (4 x i64) -> runtime `avx2` -> runtime `sse4.1`
-    /// (2 x i64) -> scalar.
+    /// Priority: compile-time `avx2` (4 x i64) -> runtime `avx2` -> runtime `sse4.2`
+    /// (2 x i64; `_mm_cmpgt_epi64` is an SSE4.2 instruction) -> scalar.
     pub fn batch_min_argmin_i64(
         prev: &[i64],
         conn: &[i32],
@@ -630,8 +646,11 @@ pub mod x86_impl {
                 // SAFETY: runtime-detected AVX2; find_best_predecessor_i64_avx2 requires avx2.
                 return unsafe { find_best_predecessor_i64_avx2(prev, conn, wcost, best_so_far) };
             }
-            if is_x86_feature_detected!("sse4.1") {
-                // SAFETY: runtime-detected SSE4.1; find_best_predecessor_i64_sse41 requires sse4.1.
+            if is_x86_feature_detected!("sse4.2") {
+                // SAFETY: runtime-detected SSE4.2; find_best_predecessor_i64_sse41
+                // uses `_mm_cmpgt_epi64`, an SSE4.2 instruction, so SSE4.2 (not
+                // only SSE4.1) is required. A CPU with SSE4.1 but not SSE4.2
+                // (e.g. Penryn) falls through to the scalar path below.
                 return unsafe { find_best_predecessor_i64_sse41(prev, conn, wcost, best_so_far) };
             }
             crate::viterbi::simd::scalar::batch_min_argmin_i64(prev, conn, wcost, best_so_far)
@@ -725,6 +744,10 @@ pub mod x86_gather {
             let narrow =
                 unsafe { _mm_loadu_si128(ptr_g.add(base) as *const core::arch::x86_64::__m128i) };
             let wide = _mm256_cvtepi16_epi32(narrow);
+            // SAFETY: `base = chunk * 8` with `chunk < chunks = count / 8`, so
+            // `base + 8 <= count <= out.len()`, and the 8 `i32`s (32 bytes)
+            // written start at `out.as_mut_ptr().add(base)` inside `out`; avx2
+            // is enabled for this `#[target_feature]` body.
             unsafe {
                 _mm256_storeu_si256(
                     out.as_mut_ptr().add(base) as *mut core::arch::x86_64::__m256i,

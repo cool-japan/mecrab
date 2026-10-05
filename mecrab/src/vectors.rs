@@ -73,8 +73,13 @@ struct VectorHeader {
     reserved: [u32; 4],
 }
 
-// Safety: VectorHeader is repr(C) with only u32 fields
+// SAFETY: `VectorHeader` is `#[repr(C)]` and every field is a `u32` or an
+// array of `u32`, so it has no padding, no invalid bit patterns and no pointer
+// or reference fields — the requirements of `bytemuck::Pod`.
 unsafe impl Pod for VectorHeader {}
+// SAFETY: an all-zero `VectorHeader` is a valid value (every field is `u32` or
+// `[u32; _]`, for which zero is valid), which is `bytemuck::Zeroable`'s
+// requirement.
 unsafe impl Zeroable for VectorHeader {}
 
 /// Vocabulary index mapping word_id → surface form.
@@ -149,8 +154,12 @@ pub struct VectorStore {
     vocab: Option<VocabIndex>,
 }
 
-// Safety: The data_ptr points to immutable memory-mapped data
+// SAFETY: `VectorStore` only ever reads through `data_ptr`, never writes, and
+// the memory it points at is the immutable `_mmap` that `self` keeps alive, so
+// moving one between threads is sound.
 unsafe impl Send for VectorStore {}
+// SAFETY: as the `Send` impl above — every access through `data_ptr` is an
+// immutable read of the mapped file, so `&VectorStore` is safe to share.
 unsafe impl Sync for VectorStore {}
 
 impl std::fmt::Debug for VectorStore {
@@ -204,20 +213,46 @@ impl VectorStore {
         let vocab_size = header.vocab_size as usize;
         let dim = header.dim as usize;
 
-        // Validate file size
+        // Validate file size. `checked_mul`/`checked_add` rather than `*`/`+`:
+        // `vocab_size` and `dim` come straight from the file header, and a
+        // crafted header (e.g. both `2^31`) would wrap the product in a release
+        // build, letting a far-too-small file pass the equality check below and
+        // leaving the later `data_ptr` reads out of bounds. An overflow is
+        // reported as a size mismatch instead.
         let element_size = data_type.element_size();
-        let expected_size = Self::HEADER_SIZE + (vocab_size * dim * element_size);
+        let expected_size = vocab_size
+            .checked_mul(dim)
+            .and_then(|n| n.checked_mul(element_size))
+            .and_then(|n| n.checked_add(Self::HEADER_SIZE));
 
-        if data.len() != expected_size {
+        if Some(data.len()) != expected_size {
+            let expected = expected_size.map_or_else(|| "overflow".to_string(), |n| n.to_string());
             return Err(Error::VectorError(format!(
                 "Vector file size mismatch: expected {} bytes, got {}",
-                expected_size,
+                expected,
                 data.len()
             )));
         }
 
         // Get pointer to vector data
         let data_ptr = data[Self::HEADER_SIZE..].as_ptr();
+        // `get` / `get_dequantized` view the element bytes as `f32` / `u16`
+        // through `bytemuck::cast_slice`, which panics on a misaligned slice.
+        // Every row starts at a multiple of the element size, so an aligned
+        // data section keeps every row aligned. The section starts 32 bytes
+        // into a page-aligned map, so this always holds; check it here instead
+        // of assuming it.
+        let aligned = match data_type {
+            VectorDataType::F32 => data_ptr.cast::<f32>().is_aligned(),
+            VectorDataType::F16 => data_ptr.cast::<u16>().is_aligned(),
+            VectorDataType::I8 => true,
+        };
+        if !aligned {
+            return Err(Error::VectorError(format!(
+                "Vector data is not {}-byte aligned in memory",
+                element_size
+            )));
+        }
 
         // For I8 quantization, `reserved[0]` stores the scale as an f32 bit pattern.
         let quant_scale = if data_type == VectorDataType::I8 && header.reserved[0] != 0 {
@@ -244,6 +279,10 @@ impl VectorStore {
     /// Returns an error if file cannot be opened or is invalid.
     pub fn from_file(path: impl AsRef<std::path::Path>) -> Result<Self> {
         let file = File::open(path).map_err(|e| Error::VectorError(e.to_string()))?;
+        // SAFETY: `Mmap::map` is unsafe because another process mutating or
+        // truncating the mapped file while it is mapped is undefined behaviour;
+        // this maps a vector-store file the caller supplied and is expected not
+        // to modify for the lifetime of the store, the documented usage.
         let mmap = unsafe { Mmap::map(&file).map_err(|e| Error::VectorError(e.to_string()))? };
         Self::from_mmap(Arc::new(mmap))
     }
@@ -275,7 +314,14 @@ impl VectorStore {
         let element_size = self.data_type.element_size();
         let start = word_id * self.dim * element_size;
 
-        // Safety: We validated bounds and data type
+        // SAFETY: `word_id < self.vocab_size` was checked above, so `start +
+        // dim * element_size = (word_id + 1) * dim * element_size <=
+        // vocab_size * dim * element_size`, the data length `from_mmap`
+        // validated (with overflow-checked arithmetic) against the file; the
+        // bytes from `data_ptr.add(start)` therefore lie inside the immutable
+        // `_mmap` that `self` keeps alive. The slice is of `u8` (no alignment
+        // needed); `from_mmap` checked the data section is `f32`-aligned, so
+        // `cast_slice` gets an aligned, whole-element slice.
         unsafe {
             let slice =
                 std::slice::from_raw_parts(self.data_ptr.add(start), self.dim * element_size);
@@ -297,6 +343,11 @@ impl VectorStore {
             VectorDataType::F32 => self.get(word_id).map(std::borrow::Cow::Borrowed),
             VectorDataType::F16 => {
                 let start = idx * self.dim * 2;
+                // SAFETY: `idx < self.vocab_size` was checked above and this
+                // arm runs only for F16 (`element_size == 2`), so `start + dim *
+                // 2 = (idx + 1) * dim * 2 <= vocab_size * dim * 2`, the data
+                // length `from_mmap` validated; the bytes lie inside the
+                // immutable `_mmap` kept alive by `self`.
                 let bytes =
                     unsafe { std::slice::from_raw_parts(self.data_ptr.add(start), self.dim * 2) };
                 let u16s: &[u16] = bytemuck::cast_slice(bytes);
@@ -306,6 +357,11 @@ impl VectorStore {
             }
             VectorDataType::I8 => {
                 let start = idx * self.dim;
+                // SAFETY: `idx < self.vocab_size` was checked above and this
+                // arm runs only for I8 (`element_size == 1`), so `start + dim =
+                // (idx + 1) * dim <= vocab_size * dim`, the data length
+                // `from_mmap` validated; the bytes lie inside the immutable
+                // `_mmap` kept alive by `self`.
                 let bytes =
                     unsafe { std::slice::from_raw_parts(self.data_ptr.add(start), self.dim) };
                 let i8s: &[i8] = bytemuck::cast_slice(bytes);

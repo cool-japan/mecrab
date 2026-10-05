@@ -113,8 +113,13 @@ pub struct SysDic {
     feature_cache: RwLock<HashMap<u32, Arc<str>>>,
 }
 
-// Safety: The pointers point to immutable memory-mapped data
+// SAFETY: `SysDic` only ever reads through `tokens_ptr` and `features_ptr`,
+// never writes, and both point into the immutable backing store (`_backing`,
+// an `Arc<Mmap>` or `Arc<Vec<u8>>`) that `self` keeps alive, so moving one
+// between threads is sound.
 unsafe impl Send for SysDic {}
+// SAFETY: as the `Send` impl above — every access through the two pointers is
+// an immutable read of shared backing memory, so `&SysDic` is safe to share.
 unsafe impl Sync for SysDic {}
 
 impl std::fmt::Debug for SysDic {
@@ -197,8 +202,17 @@ impl SysDic {
             .unwrap_or(charset_bytes.len());
         let charset = String::from_utf8_lossy(&charset_bytes[..charset_end]).to_string();
 
-        // Validate sizes
-        let expected_total = HEADER_SIZE + da_size + token_size + feature_size;
+        // Validate sizes. Checked: on a 32-bit target (wasm32) the sum of the
+        // three header-supplied section sizes can wrap, which would let a short
+        // file pass the length check below.
+        let expected_total =
+            Self::sections_end(da_size, token_size, feature_size).ok_or_else(|| {
+                Error::CorruptedDictionary(format!(
+                    "Dictionary section sizes overflow the address space: \
+                     da {}, token {}, feature {}",
+                    da_size, token_size, feature_size
+                ))
+            })?;
         if data.len() < expected_total {
             return Err(Error::CorruptedDictionary(format!(
                 "Dictionary file truncated: expected {} bytes, got {}",
@@ -215,6 +229,18 @@ impl SysDic {
         let token_offset = da_offset + da_size;
         let tokens_ptr = data[token_offset..].as_ptr() as *const Token;
         let tokens_count = token_size / Token::SIZE;
+        // `get_token` hands out `&Token`, which must be aligned for `Token`
+        // (4 bytes). A dictionary this crate's builder or `mecab-dict-index`
+        // writes keeps the token section at `HEADER_SIZE + 8 * units`, so it is
+        // aligned in a memory map or allocator buffer; a header whose `da_size`
+        // breaks that is rejected instead of being read misaligned.
+        if !tokens_ptr.is_aligned() {
+            return Err(Error::CorruptedDictionary(format!(
+                "Token section at offset {} is not {}-byte aligned in memory",
+                token_offset,
+                std::mem::align_of::<Token>()
+            )));
+        }
 
         // Get feature strings pointer
         let feature_offset = token_offset + token_size;
@@ -234,6 +260,15 @@ impl SysDic {
             right_size,
             charset,
         ))
+    }
+
+    /// The end of the last section, `HEADER_SIZE + da_size + token_size +
+    /// feature_size`, or `None` when that does not fit in `usize`.
+    fn sections_end(da_size: usize, token_size: usize, feature_size: usize) -> Option<usize> {
+        HEADER_SIZE
+            .checked_add(da_size)?
+            .checked_add(token_size)?
+            .checked_add(feature_size)
     }
 
     /// Load system dictionary from memory-mapped file
@@ -359,7 +394,14 @@ impl SysDic {
     #[inline]
     fn get_token(&self, index: usize) -> Option<&Token> {
         if index < self.tokens_count {
-            // Safety: We verified the index is in bounds
+            // SAFETY: `index < self.tokens_count` was just checked, and
+            // `tokens_ptr` addresses `tokens_count` contiguous immutable
+            // `Token`s: `parse_bytes` set `tokens_count = token_size /
+            // Token::SIZE`, checked `HEADER_SIZE + da + token + feature` against
+            // the file length without overflow, and checked `tokens_ptr` is
+            // aligned for `Token` (every field is an integer, so any bytes are a
+            // valid `Token`). `_backing` keeps that memory alive and unmutated
+            // for `self`, so the reference is valid for `&self`.
             Some(unsafe { &*self.tokens_ptr.add(index) })
         } else {
             None
@@ -373,19 +415,27 @@ impl SysDic {
             return "";
         }
 
-        // Safety: We verified the offset is in bounds
+        // SAFETY: `offset < self.features_size` was checked just above, and
+        // `features_ptr` addresses `features_size` immutable bytes that
+        // `parse_bytes` validated against the file length (without overflow),
+        // so `ptr` points inside the feature section.
         let ptr = unsafe { self.features_ptr.add(offset) };
 
         // Find null terminator
         let mut len = 0;
         while len < self.features_size - offset {
+            // SAFETY: the loop guard keeps `len < features_size - offset`, so
+            // `offset + len < features_size` and `ptr.add(len)` is inside the
+            // same immutable feature section as `ptr`.
             if unsafe { *ptr.add(len) } == 0 {
                 break;
             }
             len += 1;
         }
 
-        // Safety: We found the null terminator
+        // SAFETY: the loop stopped with `len <= features_size - offset`, so the
+        // `len` bytes from `ptr` all lie inside the feature section `_backing`
+        // owns and keeps alive; the bytes are not mutated for `&self`.
         let slice = unsafe { std::slice::from_raw_parts(ptr, len) };
         std::str::from_utf8(slice).unwrap_or("")
     }
@@ -520,5 +570,19 @@ mod tests {
     #[test]
     fn test_header_size() {
         assert_eq!(HEADER_SIZE, 72);
+    }
+
+    #[test]
+    fn test_sections_end_is_checked() {
+        assert_eq!(SysDic::sections_end(8, 16, 10), Some(HEADER_SIZE + 34));
+        assert_eq!(SysDic::sections_end(0, 0, 0), Some(HEADER_SIZE));
+        // Each addition of `HEADER_SIZE + da + token + feature` can overflow.
+        assert_eq!(SysDic::sections_end(usize::MAX, 0, 0), None);
+        assert_eq!(SysDic::sections_end(usize::MAX - HEADER_SIZE, 1, 0), None);
+        assert_eq!(SysDic::sections_end(0, usize::MAX - HEADER_SIZE, 1), None);
+        assert_eq!(
+            SysDic::sections_end(0, 0, usize::MAX - HEADER_SIZE),
+            Some(usize::MAX)
+        );
     }
 }

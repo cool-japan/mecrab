@@ -249,6 +249,8 @@ pub mod wasm_gather {
         let mut gathered: [i16; 16] = [i16::MAX; 16];
         for (i, &rid) in right_ids[..count].iter().enumerate() {
             if (rid as usize) < row_len {
+                // SAFETY: `(rid as usize) < row_len == row_data.len()` was just
+                // checked, so the index is inside `row_data`.
                 gathered[i] = unsafe { *row_data.get_unchecked(rid as usize) };
             }
         }

@@ -63,11 +63,12 @@ impl TrainingMatrix {
         self.rsize
     }
 
-    /// Connection cost using the same formula as [`ConnectionMatrix::cost`].
+    /// Connection cost using the same formula and bounds as
+    /// [`ConnectionMatrix::cost`]: `right_id < lsize`, `left_id < rsize`.
     pub fn cost(&self, right_id: u16, left_id: u16) -> i16 {
         let rc = right_id as usize;
         let lc = left_id as usize;
-        if rc >= self.rsize || lc >= self.lsize {
+        if rc >= self.lsize || lc >= self.rsize {
             return i16::MAX;
         }
         self.data[rc + self.lsize * lc]
